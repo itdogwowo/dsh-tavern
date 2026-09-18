@@ -1,0 +1,9 @@
+# dsh-tavern bundle patch
+#
+# 插入宿主半：酒館街的註冊表 + 面板用的 /api/dsh-tavern 檔案路由。
+#
+# v2 刻意只依賴 webServer 一個服務：不碰 settings / agents / systemPrompt，
+# 因為那些都要在啟動時跟核心服務打交道，任何一個卡住整個 dsh web 就開不起來。
+- insert:
+    - id: dsh-tavern
+      name: dsh-tavern

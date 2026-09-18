@@ -1,0 +1,74 @@
+{
+  "name": "dsh-tavern",
+  "version": "2.5.1",
+  "description": "酒館模式：一間酒館＝一個你選的資料夾。新增時在裡面建立人物卡／世界書／對話／設定的結構，UI 只讀寫這些檔案",
+  "license": "MIT",
+  "author": "itdogwowo",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./agent": "./lib/agent.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "lib/agent.js",
+    "lib/registry.js",
+    "lib/workspace.js",
+    "lib/assets.js",
+    "lib/pngcard.js",
+    "lib/write.js",
+    "lib/defaults.js",
+    "lib/preset.js",
+    "lib/theme.js",
+    "lib/worldbook.js",
+    "cordis.patch.yml",
+    "dsh.plugin.json",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "verify": "node verify.mjs",
+    "test": "node verify.mjs && node test-worldbook.mjs && node test-agent.mjs && node test-preset.mjs && node smoke.mjs && node test-workspace.mjs && node test-registry.mjs && node test-client.mjs"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "tavern",
+    "sillytavern",
+    "character-card",
+    "worldbook",
+    "酒館"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/itdogwowo/dsh-tavern.git"
+  },
+  "bugs": {
+    "url": "https://github.com/itdogwowo/dsh-tavern/issues"
+  },
+  "homepage": "https://github.com/itdogwowo/dsh-tavern#readme",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "external": [
+        "react"
+      ]
+    }
+  },
+  "comment": "兩個硬規則。(1) 零執行期依賴：DSH 的 loader 啟動時同步導入 loader entry，任何頂層 import 解析失敗整個 dsh web 就起不來，所以宿主半只 import node: 與相對檔案（DSH discussion #1884）；verify.mjs 會強制檢查。(2) 宿主半只依賴 webServer 一個服務：不碰 settings／agent／systemPrompt，因為那些都要在啟動時跟核心服務打交道，任何一個卡住就會讓 DSH 開不起來（macOS 上發生過）。",
+  "engines": {
+    "node": ">=22"
+  }
+}
