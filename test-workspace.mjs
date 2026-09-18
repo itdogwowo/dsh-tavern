@@ -70,6 +70,51 @@ try {
     console.log('2. 設定檔 OK — tavern.json 讀寫與壞檔容錯')
   }
 
+  /* --- 2b. 主題（theme.json ＋ custom.css）------------------------------ */
+  {
+    // 沒有 theme.json 是**正常**的，不是錯誤。
+    const none = await ws.readTheme()
+    assert.equal(none.exists, false, '沒有 theme.json 時 exists 要是 false')
+    assert.equal(none.broken, false, '沒有檔案不算壞掉')
+    assert.deepEqual(none.theme.style, { bubble: 'bubble' }, '要有一組預設 style')
+    assert.equal(await ws.readCustomCss(), '', '沒有 custom.css 時回空字串（不是錯誤）')
+
+    // 寫進去：token 與 style 都要留著，不認得的 key 要被丟掉。
+    const written = await ws.writeTheme({
+      base: 'dark',
+      tokens: { accent: '#123456' },
+      style: { bubble: 'paper' },
+    })
+    assert.equal(written.theme.style.bubble, 'paper', 'style 要留下來')
+
+    const onDisk = JSON.parse(await readFile(join(root, 'theme.json'), 'utf8'))
+    assert.equal(onDisk.style.bubble, 'paper', 'style 要真的寫進檔案（不然重開就沒了）')
+    assert.equal(onDisk.version, 1, '主題檔要有版本號')
+
+    const reread = await ws.readTheme()
+    assert.equal(reread.exists, true)
+    assert.equal(reread.broken, false)
+    assert.equal(reread.theme.tokens.accent, '#123456', 'token 要讀得回來')
+    assert.equal(reread.theme.style.bubble, 'paper', 'style 要讀得回來')
+
+    // 打錯的樣式名要落回預設**而且**回報——不然使用者以為自己改了。
+    const bad = await ws.writeTheme({ base: 'dark', tokens: {}, style: { bubble: 'buble' } })
+    assert.equal(bad.theme.style.bubble, 'bubble', '打錯要落回預設')
+    assert.ok(bad.theme.dropped.includes('style.bubble'), '打錯要回報')
+
+    // 壞掉的主題檔：用預設，但**要說它壞了**（設定頁才告訴得了使用者）。
+    await writeFile(join(root, 'theme.json'), '{ 壞掉', 'utf8')
+    const broken = await ws.readTheme()
+    assert.equal(broken.exists, true, '檔案在')
+    assert.equal(broken.broken, true, '要回報它壞了，不能默默用預設')
+    assert.equal(broken.theme.style.bubble, 'bubble', '壞掉時用預設')
+
+    // custom.css：原樣讀出來（宿主不解析、不驗證）。
+    await writeFile(join(root, 'custom.css'), '.dsh-tv-bubble { border-radius: 0 }\n', 'utf8')
+    assert.match(await ws.readCustomCss(), /border-radius: 0/, 'custom.css 要原樣讀出來')
+    console.log('2b. 主題 OK — theme.json 的 style 存得住、壞檔會回報、custom.css 原樣讀出')
+  }
+
   /* --- 3. 人物卡 -------------------------------------------------------- */
   {
     const id = await ws.writeCharacter('', { name: '測試劍士', description: '很會測試。' })
@@ -409,9 +454,17 @@ try {
     const created = await seedWs.seed()
     assert.deepEqual(
       created.sort(),
-      ['characters/老闆娘.json', 'worldbooks/酒館.json'],
-      '應該回報實際建立了這兩樣：' + created.join(', '),
+      ['characters/老闆娘.json', 'worldbooks/輸出格式.json', 'worldbooks/酒館.json'],
+      '應該回報實際建立了這三樣：' + created.join(', '),
     )
+
+    // 輸出格式是**預設**，不是選配：沒有它模型就吐普通小說（解析器只剩推斷）。
+    // 而且它必須是 `constant` ＋ 大 `order`——被預算擠掉就等於模型不知道格式。
+    const formatBook = JSON.parse(await readFile(join(seedRoot, 'worldbooks', '輸出格式.json'), 'utf8'))
+    const formatEntry = formatBook.entries['0']
+    assert.equal(formatEntry.constant, true, '格式說明要每輪都注入')
+    assert.ok(formatEntry.order >= 900, 'order 要大——世界書是先到先得，排後面會被擠掉')
+    assert.ok(formatEntry.content.includes('"kind"'), '內容要真的寫著格式')
 
     // 卡片要是可以直接用的（SillyTavern 信封 ＋ 八個面板欄位都有內容）
     const card = await seedWs.readCharacter('老闆娘')
@@ -437,7 +490,7 @@ try {
 
     // 列舉要看得見它們（使用者一開面板就該看到有人）
     assert.equal((await seedWs.listCharacters()).length, 1, '人物卡清單要有老闆娘')
-    assert.equal((await seedWs.listWorldbooks()).length, 1, '世界書清單要有那一本')
+    assert.equal((await seedWs.listWorldbooks()).length, 2, '世界書清單要有那兩本（酒館 ＋ 輸出格式）')
 
     // 只補不覆蓋：使用者改過的東西不可以被第二次 seed 蓋掉
     await seedWs.writeCharacter('老闆娘', { name: '我自己的老闆娘', description: '改過了' })

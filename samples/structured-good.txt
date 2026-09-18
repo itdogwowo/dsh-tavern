@@ -1,0 +1,6 @@
+{"kind":"narration","text":"她抬起頭，把抹布放下。"}
+{"kind":"speech","who":"老闆娘","text":"你終於來了。"}
+{"kind":"action","text":"她把杯子推過來。"}
+{"kind":"thought","text":"他今天不太一樣。"}
+{"kind":"panel","text":"時間：晚上十一點\n心情：疲倦"}
+{"kind":"speech","who":"老闆娘","text":"坐吧，站著像什麼話。"}

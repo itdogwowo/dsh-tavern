@@ -11,14 +11,22 @@
  * 用法：node test-agent.mjs
  */
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const { renderCard, readCard, apply, inject, AGENT_BUILD, __clearCache, resolveBinding, resolveCardFile } =
   await import('./lib/agent.js')
 
-const NAME = 'tavern-agent-' + '2.5.1'
+/**
+ * ⚠️ 版本**不要寫死在測試裡**。
+ *
+ * 這裡以前是 `'tavern-agent-' + '2.5.1'`——所以每次升版都要記得改這一行，
+ * 而訊息卻寫著「要對得上 package.json」，它根本沒讀 package.json。
+ * 現在直接讀 manifest：版本只有一個來源，升版不會漏掉這一條。
+ */
+const manifest = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'))
+const NAME = 'tavern-agent-' + manifest.version
 assert.equal(AGENT_BUILD, NAME, '版本標記要對得上 package.json')
 console.log('1. 匯出 OK — build =', AGENT_BUILD)
 

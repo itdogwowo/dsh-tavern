@@ -1028,11 +1028,514 @@ function spyRpc(seen, extra) {
   // 面板直接爆掉）。每一段自己開頭歸零是最省事的做法。
   reactImpl.resetHooks()
   const settings = flatten(renderComponent(TavernSettingsPage, {}))
-  for (const heading of ['這間酒館', '人物卡', '世界書', '對話紀錄']) {
-    assert.ok(settings.includes(heading) || settings.includes('還沒有選定酒館'), `設定頁要有「${heading}」`)
-  }
+  assert.ok(
+    settings.includes('還沒有選定酒館'),
+    '沒有酒館時，設定頁要說「還沒有選定酒館」而不是留一格空白',
+  )
   assert.ok(flatten(renderComponent(TavernChatPage, {})).includes('對話'), '對話頁要有標題')
-  console.log('4. 面板 OK — 設定頁分區與對話頁都渲染得出來')
+  console.log('4. 面板 OK — 沒有酒館的空狀態與對話頁都渲染得出來')
+}
+
+/* --------------- 主面板的四個分區（plan.md §7.5、redesign.md §3.2）--------------- */
+
+{
+  // ⚠️ 這一段**真的餵一間酒館進去**。
+  //
+  // 舊版沒有餵，所以「設定頁要有四個分區」那條斷言其實是**空跑**的：畫面只渲染了
+  // 「還沒有選定酒館」，而那段說明文字剛好含「對話紀錄」——斷言一直是綠的，
+  // 卻連一個分區都沒驗到。`useTavernData` 現在支援逐欄餵種子就是為了補這個洞。
+  Object.assign(exportsObject.__testSeed, {
+    loaded: true,
+    taverns: [{ id: 'tv-1', name: '測試酒館', active: true, exists: true, scaffolded: true, icon: '🍺' }],
+    activeId: 'tv-1',
+    characters: [],
+    summary: { name: 'tavern', counts: {}, files: [], layout: [] },
+    settings: { name: '測試酒館', note: '' },
+  })
+
+  const labels = exportsObject.__zones.map((one) => one.label)
+  assert.deepEqual(
+    labels,
+    ['🏠 大廳', '💬 包廂', '🎭 卡司', '📖 藏書'],
+    '四個分區的名字要跟 redesign.md §3.2 一致',
+  )
+
+  const renderZone = (key) => {
+    reactImpl.resetHooks()
+    exportsObject.__setZone(key)
+    return flatten(renderComponent(TavernSettingsPage, {}))
+  }
+
+  reactImpl.resetHooks()
+  exportsObject.__setZone('hall')
+  const hallTree = renderComponent(TavernSettingsPage, {})
+  const hall = flatten(hallTree)
+  // ⚠️ 分區列要用**元素**來驗，不要用文字：大廳的「快速入口」也會寫「💬 包廂」，
+  // 用 `includes` 的話，就算分區列整條不見了這條斷言照樣是綠的。
+  const tabs = collect(
+    hallTree,
+    (el) => el.type === 'button' && String(el.props.className || '').indexOf('dsh-tv-zone') === 0,
+  )
+  assert.deepEqual(tabs.map((one) => one.props.children), labels, '分區列要是那四個分頁')
+  assert.ok(hall.includes('店面圖'), '🏠 大廳要有店面圖（酒館自己的樣子）')
+
+  // 一次只畫一個分區——這是「分區」的定義，不是實作細節。
+  const cast = renderZone('cast')
+  assert.ok(cast.includes('匯入卡片'), '🎭 卡司要有「匯入卡片」')
+  assert.equal(cast.includes('店面圖'), false, '切到卡司之後，大廳的內容不該還在畫面上')
+  assert.ok(cast.includes('🎭 卡司'), '分區列在每一區都要在（那是切換的入口）')
+
+  assert.ok(renderZone('books').includes('匯入世界書'), '📖 藏書要有「匯入世界書」')
+  assert.ok(renderZone('rooms').includes('新對話'), '💬 包廂要有「＋ 新對話」')
+
+  // 還原：後面的段落不該被這裡的種子與分區狀態影響。
+  reactImpl.resetHooks()
+  exportsObject.__setZone('hall')
+  for (const key of ['taverns', 'activeId', 'characters', 'summary', 'settings']) {
+    delete exportsObject.__testSeed[key]
+  }
+  console.log('4f. 四分區 OK — 分區列、一次只畫一區、切換真的換內容')
+}
+
+/* --------- 🏠 大廳：快速入口，以及收合的破壞性動作（plan.md §7.5）--------- */
+
+{
+  Object.assign(exportsObject.__testSeed, {
+    loaded: true,
+    taverns: [{ id: 'tv-1', name: '測試酒館', active: true, exists: true, scaffolded: true, icon: '🍺' }],
+    activeId: 'tv-1',
+    characters: [],
+    summary: { name: 'tavern', counts: { characters: 2, worldbooks: 3, chats: 4, art: 0 }, files: [], layout: [] },
+    settings: { name: '測試酒館', note: '' },
+  })
+  reactImpl.resetHooks()
+  exportsObject.__setZone('hall')
+  const hallTree = renderComponent(TavernSettingsPage, {})
+  const hallText = flatten(hallTree)
+
+  // 「移除」是破壞性動作，不可以跟「重新命名」並排——它要躲在收合的「進階」後面。
+  assert.ok(hallText.includes('進階'), '🏠 大廳要有「進階」開關')
+  assert.equal(
+    hallText.includes('從酒館街移除'),
+    false,
+    '破壞性動作預設不可以攤在畫面上，要收在「進階」裡',
+  )
+
+  // 快速入口要**帶著數量**，而且要真的跳得過去。
+  const quick = collect(
+    hallTree,
+    (el) => el.type === 'button' && el.props.className === 'dsh-tv-quickBtn',
+  )
+  assert.equal(quick.length, 3, '快速入口三個：包廂／卡司／藏書')
+  assert.ok(hallText.includes('4 份對話'), '快速入口要顯示對話數量（來自 summary.counts）')
+  quick[0].props.onClick()
+  assert.equal(exportsObject.__currentZone(), 'rooms', '按快速入口要真的切到那一區')
+
+  // 展開之後才看得到——這一條是「收合」的定義。
+  reactImpl.resetHooks()
+  exportsObject.__setZone('hall')
+  const toggles = collect(
+    renderComponent(TavernSettingsPage, {}),
+    (el) => el.type === 'button' && el.props.className === 'dsh-tv-advToggle',
+  )
+  assert.equal(toggles.length, 1, '「進階」只有一個開關')
+  toggles[0].props.onClick()
+  const opened = flatten(renderComponent(TavernSettingsPage, {}))
+  assert.ok(opened.includes('從酒館街移除'), '展開「進階」之後才出現「從酒館街移除」')
+  assert.ok(opened.includes('資料夾與裡面所有檔案都不會被刪除'), '說明要跟著按鈕一起出現')
+
+  reactImpl.resetHooks()
+  exportsObject.__setZone('hall')
+  for (const key of ['taverns', 'activeId', 'characters', 'summary', 'settings']) {
+    delete exportsObject.__testSeed[key]
+  }
+  console.log('4g. 大廳 OK — 快速入口會跳區、破壞性動作收在「進階」裡')
+}
+
+/* ---------- 🎭 卡司：海報牆（找卡）與編輯器（改卡）分開（redesign §3.2）---------- */
+
+{
+  const cardOf = (id, name, primary) => ({
+    id,
+    file: id + '.json',
+    card: { name },
+    assets: {
+      items: primary === null ? [] : [{ name: primary, url: '/api/dsh-tavern/assets/character/' + id + '/' + primary }],
+      primary,
+      owner: id,
+    },
+  })
+  Object.assign(exportsObject.__testSeed, {
+    loaded: true,
+    taverns: [{ id: 'tv-1', name: '測試酒館', active: true, exists: true, scaffolded: true }],
+    activeId: 'tv-1',
+    characters: [cardOf('老闆娘', '老闆娘', 'a.png'), cardOf('酒保', '酒保', null)],
+    summary: { name: 'tavern', counts: { characters: 2 }, files: [], layout: [] },
+    settings: { name: '測試酒館', note: '' },
+  })
+  exportsObject.__setRpc((op) =>
+    Promise.resolve(op === 'character.read' ? { name: '酒保', description: '看櫃檯的。' } : {}),
+  )
+
+  reactImpl.resetHooks()
+  exportsObject.__setZone('cast')
+  const wallTree = renderComponent(TavernSettingsPage, {})
+  const wallText = flatten(wallTree)
+  // 「找卡」與「改卡」要能分開看：還沒選卡時畫的是海報牆，不是編輯器。
+  assert.equal(wallText.includes('檔案：characters/'), false, '還沒選卡時不該畫編輯器')
+
+  const posters = collect(
+    wallTree,
+    (el) => el.type === 'button' && el.props.className === 'dsh-tv-poster',
+  )
+  assert.deepEqual(posters.map((one) => one.props.title), ['老闆娘', '酒保'], '兩張卡＝兩張海報')
+  // 資產 URL 必須是「**多一個斜線**」的形狀。DSH 的 prefix 比對自己會補一個 `/`
+  // 再 `startsWith`，所以 2.6.1 之前註冊成 `…/assets/` 的宿主半只吃得進 `…/assets//…`；
+  // 單斜線的 URL 會落到 DSH 自己的 fallback（curl 401、瀏覽器 404），
+  // 症狀看起來完全像「圖不存在」，但檔案一直都在。`…/assets//…` 新舊宿主都吃。
+  assert.equal(
+    collect(posters[0], (el) => el.type === 'img')[0].props.src,
+    '/api/dsh-tavern/assets//character/老闆娘/a.png',
+    '海報的圖要指向新舊宿主都吃得到的 URL 形狀',
+  )
+
+  const withArt = posters.filter((one) => collect(one, (el) => el.type === 'img').length === 1)
+  assert.deepEqual(withArt.map((one) => one.props.title), ['老闆娘'], '有主圖的那一張要用 <img>')
+  const noArt = posters.filter(
+    (one) => collect(one, (el) => el.props.className === 'dsh-tv-posterEmpty').length === 1,
+  )
+  assert.deepEqual(noArt.map((one) => one.props.title), ['酒保'], '沒有主圖的要給佔位符，不要破圖')
+
+  // 點一張海報 → 讀卡（非同步）→ 進編輯器。
+  posters[1].props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const editTree = renderComponent(TavernSettingsPage, {})
+  assert.ok(
+    flatten(editTree).includes('檔案：characters/酒保.json'),
+    '選了卡要進編輯器（改卡）',
+  )
+
+  // 返回鍵要回得到海報牆——「找卡」與「改卡」之間要有回頭路。
+  const backRow = collect(editTree, (el) => el.props.className === 'dsh-tv-backRow')
+  assert.equal(backRow.length, 1, '編輯器要有返回鍵')
+  const backBtn = collect(backRow[0], (el) => el.type === 'button')[0]
+  assert.ok(backBtn !== undefined, '返回鍵要是一顆按鈕')
+  backBtn.props.onClick()
+  assert.equal(
+    flatten(renderComponent(TavernSettingsPage, {})).includes('檔案：characters/'),
+    false,
+    '按返回要回到海報牆',
+  )
+
+  reactImpl.resetHooks()
+  exportsObject.__setZone('hall')
+  for (const key of ['taverns', 'activeId', 'characters', 'summary', 'settings']) {
+    delete exportsObject.__testSeed[key]
+  }
+  console.log('4h. 卡司 OK — 海報牆（有圖／沒圖）、點進編輯器、返回鍵回得去')
+}
+
+/* --------- 📖 藏書：條目編輯器（純函式，所以離線驗得到完整行為）--------- */
+
+{
+  const wb = exportsObject.__worldbook
+  // 原生格式：`entries` 是**以字串化 uid 為 key 的物件**；第二條故意用 V2 的 `keys`。
+  const native = JSON.stringify({
+    entries: {
+      0: { uid: 0, key: ['鳳梨'], keysecondary: [], content: '鳳梨不進貨。', comment: '鳳梨', constant: false, order: 100 },
+      1: { uid: 1, keys: ['雨'], content: '下雨天不開門。', comment: '', constant: true },
+    },
+    rome: 'extra',
+  })
+
+  assert.deepEqual(
+    wb.entries(wb.parse(native)).map((one) => one.label),
+    ['0', '1'],
+    '原生格式（uid 物件）要列得出來',
+  )
+  assert.deepEqual(
+    wb.entries(wb.parse('{"entries":[{"comment":"a"},{"comment":"b"}]}')).map((one) => one.label),
+    ['0', '1'],
+    'V2 內嵌格式（陣列）也要列得出來',
+  )
+  assert.deepEqual(wb.entries(wb.parse('{}')), [], '沒有 entries → 空的，不要丟錯')
+  assert.deepEqual(wb.entries(wb.parse('這不是 JSON')), [], '壞掉的 JSON → 空的，不要丟錯')
+  assert.equal(wb.parse('這不是 JSON'), null, '解析不了要回 null（呼叫端據此不動狀態）')
+  assert.equal(wb.parse('[1,2]'), null, '不是物件也要回 null')
+
+  // 只改指定的那一條，其他欄位、其他條目、entries 以外的欄位全部原樣保留。
+  const patched = wb.parse(wb.patch(native, '0', 'content', '鳳梨罐頭可以。'))
+  assert.equal(patched.entries['0'].content, '鳳梨罐頭可以。', '改到那一條了')
+  assert.equal(patched.entries['0'].uid, 0, 'uid 要原樣保留')
+  assert.equal(patched.entries['0'].order, 100, 'order 要原樣保留')
+  assert.deepEqual(patched.entries['0'].keysecondary, [], '不認識的欄位也要留著')
+  assert.equal(patched.entries['1'].content, '下雨天不開門。', '別的條目不能被動到')
+  assert.equal(patched.rome, 'extra', 'entries 以外的欄位也要留著')
+
+  // ⚠️ `keys`（V2）不可以被我們擅自改成 `key`——那是別人檔案的格式。
+  assert.equal(wb.keyField({ keys: ['雨'] }), 'keys')
+  assert.equal(wb.keyField({ key: ['雨'] }), 'key')
+  assert.equal(wb.keyField({}), 'key', '兩個都沒有 → 用原生的 key')
+  assert.deepEqual(wb.keysOf({ keys: ['雨'] }), ['雨'])
+  assert.deepEqual(wb.keysOf({}), [])
+  const entryOne = wb.entries(wb.parse(native))[1].ref
+  const kept = wb.parse(wb.patch(native, '1', wb.keyField(entryOne), ['雨', '雷']))
+  assert.deepEqual(kept.entries['1'].keys, ['雨', '雷'], 'V2 的 keys 要寫回 keys')
+  assert.equal(kept.entries['1'].key, undefined, '不要無中生有一個 key')
+  assert.equal(kept.entries['1'].constant, true, 'constant 要留著')
+
+  // 找不到那一條／文字壞掉 → 回 null（呼叫端就不會動狀態，畫面不會爆）。
+  assert.equal(wb.patch(native, '不存在', 'content', 'x'), null, '找不到條目要回 null')
+  assert.equal(wb.patch('壞掉的 JSON', '0', 'content', 'x'), null, '解析不了要回 null')
+
+  console.log('4i. 藏書 OK — 條目吃得下兩種格式、只改那一條、keys 不會被改名')
+}
+
+/* ---------- 顯示層解析：原文 → 節點樹（推斷優先、容錯）---------- */
+
+{
+  const parse = exportsObject.__display.parse
+  const kindsOf = (result) => result.nodes.filter((n) => n.kind !== 'blank').map((n) => [n.kind, n.source])
+
+  // 1. 排版慣例：**不需要模型配合的那一層**（也是唯一不會隨對話變長而退化的）。
+  assert.deepEqual(
+    kindsOf(parse('她抬起頭。\n「你終於來了。」\n（她把布放下。）')),
+    [
+      ['narration', 'plain'],
+      ['speech', 'quoted'],
+      ['action', 'quoted'],
+    ],
+    '引號＝台詞、括號＝動作、其餘＝旁白',
+  )
+
+  // ⚠️ 只有「整行被包住」才算台詞——「行內有引號」是猜錯的主要來源。
+  assert.equal(parse('他說：「你好」然後就走了。').nodes[0].kind, 'narration', '行內的引號不算台詞')
+  assert.equal(parse('「」').nodes[0].kind, 'narration', '空引號不算台詞')
+  // 原文照留（不前處理）——所以複製、搜尋、匯出都拿到原樣的字。
+  assert.equal(parse('「你好」').nodes[0].text, '「你好」', '原文要一字不動')
+  assert.equal(parse('  「你好」  ').nodes[0].text, '「你好」', '只去頭尾空白')
+
+  // 2. 標記優先於推斷，而且**兩者可以混用**（走樣時最需要的性質）。
+  const cfg = { markers: [{ tag: '台詞', kind: 'speech' }, { tag: '面板', kind: 'panel' }] }
+  assert.deepEqual(
+    kindsOf(parse('她抬起頭。\n<台詞>你終於來了。</台詞>\n（她把布放下。）', cfg)),
+    [
+      ['narration', 'plain'],
+      ['speech', 'marked'],
+      ['action', 'quoted'],
+    ],
+    '有標記走標記、沒有的走推斷',
+  )
+
+  // who：標記帶的優先，沒帶就用這一則的預設（＝訊息本身的角色名）。
+  assert.equal(parse('<台詞 who="她">走吧。</台詞>', cfg).nodes[0].who, '她', '要讀得出標記的 who')
+  assert.equal(parse('「走吧。」', { defaultWho: '老闆娘' }).nodes[0].who, '老闆娘', '沒標記就用預設')
+
+  // 3. ⚠️ 走樣：**未閉合的標記不可以吃掉後面正常閉合的標記**。
+  //    一個漏掉的收尾標記若吞掉後面整段，那是比走樣更糟的結果。
+  const broken = parse('<面板>\n心情：累\n\n<台詞>走吧。</台詞>\n她點頭。', cfg)
+  assert.deepEqual(
+    kindsOf(broken),
+    [
+      ['panel', 'marked'],
+      ['speech', 'marked'],
+      ['narration', 'plain'],
+    ],
+    '未閉合要停在下一個標記之前',
+  )
+  assert.equal(broken.problems.length, 1, '未閉合要回報一條問題')
+  assert.equal(broken.problems[0].layer, 'format', '未閉合是**格式層**')
+  assert.equal(broken.problems[0].severity, 'fatal', '未閉合是致命的（它會把後面的內容吃進來）')
+  assert.equal(broken.problems[0].kind, 'unclosed')
+  assert.equal(broken.problems[0].tag, '面板')
+  assert.ok(broken.problems[0].line >= 1, '要帶行號——修復層才知道要送哪一段')
+
+  // 孤兒收尾標記：不該爆，也不該讓文字消失。
+  const orphan = parse('她點頭。</台詞>然後走了。', cfg)
+  assert.equal(orphan.nodes.length, 1, '孤兒收尾標記不該多出節點')
+  assert.ok(orphan.nodes[0].text.includes('然後走了。'), '文字要留著（不可以整段不見）')
+
+  // 區塊內容的頭尾空白要拿掉——不然渲染端會多出一個空的頭行／尾行。
+  assert.equal(parse('<面板>\n心情：累\n</面板>', cfg).nodes[0].text, '心情：累', '區塊內容要去頭尾空白')
+
+  // ⚠️ **一行不一定是同一種東西。** 真實的寫法會把「台詞＋旁白＋台詞」擠在同一行
+  //    （實測在使用者的對話裡佔三分之一）。整行判成一種的話，語音會把旁白也唸出來。
+  const inline = parse('「第一次來的，我通常不給酒單。」她轉身拿下兩只杯子，「你會站在門口猶豫一下。」')
+  assert.deepEqual(
+    inline.nodes.map((n) => n.kind),
+    ['speech', 'narration', 'speech'],
+    '同一行要切成台詞／旁白／台詞三段',
+  )
+  assert.ok(inline.nodes[0].text.startsWith('「第一次來的'), '台詞要含引號本身（原文照留）')
+  assert.ok(inline.nodes[1].text.startsWith('她轉身拿下'), '中間那一段是旁白')
+  assert.equal(inline.nodes[0].para, inline.nodes[1].para, '同一行的片段共用 para 編號')
+  assert.equal(inline.nodes[1].para, inline.nodes[2].para, '同一行的片段共用 para 編號')
+
+  // 引號沒有收尾（模型很常漏）＝吃到行尾 + warning。**不要讓整段文字消失。**
+  const unclosedQuote = parse('她說：「你先坐一下。')
+  assert.equal(unclosedQuote.nodes.length, 2, '旁白 ＋ 台詞')
+  assert.equal(unclosedQuote.nodes[1].kind, 'speech', '沒有收尾的引號當作台詞')
+  assert.ok(
+    unclosedQuote.problems.some((one) => one.kind === 'unclosed-quote'),
+    '要回報引號沒收尾（格式層，可接受）',
+  )
+
+  // 空的一對引號不是空台詞（那會畫出一個空氣泡）。
+  assert.equal(parse('「」').nodes[0].kind, 'narration', '空引號是雜訊，不是台詞')
+
+  // ---- 資料區塊（`key: value`）：那一半**可以嚴**，因為壞掉只損失那一塊 ----
+  const data = parse('<面板>\n時間：晚上十一點\n心情：疲倦\n</面板>', cfg).nodes[0]
+  assert.deepEqual(
+    data.rows,
+    [
+      { key: '時間', value: '晚上十一點' },
+      { key: '心情', value: '疲倦' },
+    ],
+    '全部符合就要拆成欄位',
+  )
+  assert.ok(data.text.includes('時間：晚上十一點'), '原文要留著（不支援 rows 的渲染端照樣畫得出來）')
+
+  // 半形冒號也吃，但**全形優先**（不然 `時間：晚上 11:30` 會被切成 `晚上 11`）。
+  assert.deepEqual(parse('<面板>\nHP: 47\n</面板>', cfg).nodes[0].rows, [{ key: 'HP', value: '47' }], '半形冒號')
+  assert.deepEqual(
+    parse('<面板>\n時間：晚上 11:30\n</面板>', cfg).nodes[0].rows,
+    [{ key: '時間', value: '晚上 11:30' }],
+    '全形冒號優先',
+  )
+
+  // ⚠️ 只要有一行不符合，就**整塊當文字**——半對的資料畫成表格比純文字更難讀。
+  assert.equal(
+    parse('<面板>\n心情：累\n今晚的帳還沒結\n</面板>', cfg).nodes[0].rows,
+    null,
+    '有一行不符合就整塊當文字',
+  )
+  assert.equal(parse('<面板>\n只是普通的一段話\n</面板>', cfg).nodes[0].rows, null, '沒有冒號就不是資料')
+
+  // ---- 第二層（詞彙）：用了但**沒宣告**的標記——走樣偵測的主力 ----
+  // 模型最常見的錯不是語法壞，是用了別的名字（打錯、換寫法、記成別張卡）。
+  // 沒有這一條，那些標記會靜靜地變成文字，而使用者只覺得「卡片怎麼不見了」。
+  const unknown = parse('<狀態欄>心情：累</狀態欄>', cfg)
+  assert.equal(unknown.problems.length, 1, '未宣告的標記要回報一條')
+  assert.equal(unknown.problems[0].layer, 'schema', '那是**詞彙層**')
+  assert.equal(unknown.problems[0].kind, 'unknown-tag')
+  assert.equal(unknown.problems[0].tag, '狀態欄')
+  assert.equal(unknown.problems[0].severity, 'acceptable', '不修也看得下去（當文字）')
+  assert.equal(unknown.nodes[0].source, 'plain', '未宣告的標記要當普通文字')
+
+  // 格式層：孤兒收尾標記（通常代表前面那一段被別的東西吃掉了）
+  const orphanClose = parse('她點頭。</台詞>然後走了。', cfg)
+  assert.ok(
+    orphanClose.problems.some((one) => one.kind === 'orphan-close' && one.layer === 'format'),
+    '要回報孤兒收尾',
+  )
+
+  // 詞彙層：宣告成資料區塊，內容卻不是 `key: value`
+  const mismatch = parse('<面板>\n今天很累\n</面板>', { markers: [{ tag: '面板', kind: 'data' }] })
+  assert.ok(
+    mismatch.problems.some((one) => one.kind === 'data-mismatch' && one.layer === 'schema'),
+    '要回報內容不符約定',
+  )
+
+  // 乾淨的輸入不該誤報
+  assert.deepEqual(parse('她抬起頭。\n「你終於來了。」', cfg).problems, [], '正常輸入不該有問題')
+
+  /* ---- B 方案：一行一個物件（模型直接吐結構）---- */
+
+  const given = parse('{"kind":"speech","who":"老闆娘","text":"你終於來了。"}')
+  assert.equal(given.nodes[0].kind, 'speech')
+  assert.equal(given.nodes[0].source, 'given', '結構化的來源是 given')
+  assert.equal(given.nodes[0].who, '老闆娘', 'who 由模型指定，不是推斷')
+  assert.deepEqual(given.problems, [], '好的結構不該有問題')
+
+  // **後處理填的**：模型只給 kind/who/text，rows 由內容拆出來。
+  assert.deepEqual(
+    parse('{"kind":"panel","text":"時間：晚上十一點\\n心情：疲倦"}').nodes[0].rows,
+    [
+      { key: '時間', value: '晚上十一點' },
+      { key: '心情', value: '疲倦' },
+    ],
+    'rows 是後處理填的，模型不需要知道它',
+  )
+
+  // ⚠️ 壞掉的一行＝**一個問題、一個節點**。不可以被推斷碎成十幾個片段
+  //    （JSON 行裡的引號是語法，不是台詞——實測踩過）。
+  const badJson = parse('{"kind":"speech","who":"老闆娘","text":"沒有收尾"')
+  assert.equal(badJson.nodes.length, 1, '壞掉的一行只能是一個節點')
+  assert.equal(badJson.nodes[0].kind, 'narration', '降級成旁白')
+  assert.equal(badJson.problems.length, 1, '一個問題')
+  assert.equal(badJson.problems[0].kind, 'bad-json')
+  assert.equal(badJson.problems[0].layer, 'format', '那是格式層')
+  assert.equal(badJson.problems[0].severity, 'fatal', '值得修')
+
+  // 詞彙層：不認得的 kind → 當旁白並回報，但**文字要救回來**
+  const badKind = parse('{"kind":"speach","text":"打錯字"}')
+  assert.equal(badKind.nodes[0].kind, 'narration', '不認得的 kind 當旁白')
+  assert.equal(badKind.nodes[0].text, '打錯字', '文字要救回來，不是丟掉')
+  assert.equal(badKind.problems[0].kind, 'unknown-kind')
+  assert.equal(badKind.problems[0].layer, 'schema', '那是詞彙層')
+  assert.equal(badKind.problems[0].value, 'speach', '要說出是哪個值')
+
+  // 安全網：不是 JSON 的行照樣走推斷（舊訊息、模型忘了吐結構）
+  assert.equal(parse('「這一行有引號。」').nodes[0].source, 'quoted', '不是 JSON 就走推斷')
+
+  /* ---- 本地修復（第一層）：機械式的，不需要模型 ---- */
+
+  const brokenJson = '{"kind":"speech","who":"老闆娘","text":"沒有收尾"'
+  const brokenParsed = parse(brokenJson)
+  assert.equal(brokenParsed.problems[0].kind, 'bad-json')
+
+  const repaired = exportsObject.__display.repair(brokenJson, brokenParsed.problems)
+  assert.equal(repaired.log.length, 1, '要有一條修復紀錄')
+  assert.equal(repaired.log[0].line, 1, '紀錄要說是哪一行')
+  assert.equal(repaired.log[0].kind, 'bad-json', '紀錄要說是哪一種問題')
+  assert.ok(repaired.log[0].action.includes('}'), '紀錄要說修了什麼')
+  assert.equal(repaired.log[0].before, brokenJson, '紀錄要留原文')
+  assert.equal(repaired.text, brokenJson + '}', '補上少的收尾大括號')
+  assert.deepEqual(parse(repaired.text).problems, [], '修完就不該再有問題')
+  assert.equal(parse(repaired.text).nodes[0].source, 'given', '修完要真的變成結構化節點')
+  assert.equal(parse(repaired.text).nodes[0].who, '老闆娘', '而且要讀得出 who')
+
+  // ⚠️ **第二層也能本地修**——打錯的模糊比對、缺的用推斷反推，都不需要模型。
+  const typo = '{"kind":"speach","text":"x"}'
+  const typoFixed = exportsObject.__display.repair(typo, parse(typo).problems)
+  assert.equal(typoFixed.log.length, 1, '打錯的 kind 要本地修好')
+  assert.equal(JSON.parse(typoFixed.text).kind, 'speech', 'speach → speech（模糊比對）')
+  assert.equal(typoFixed.deferred.length, 0, '修好了就不該交給模型')
+
+  const noKind = '{"who":"老闆娘","text":"「台詞。」"}'
+  const noKindFixed = exportsObject.__display.repair(noKind, parse(noKind).problems)
+  assert.equal(JSON.parse(noKindFixed.text).kind, 'speech', '缺 kind 用推斷反推（有引號＝台詞）')
+
+  // 只有「**致命又修不了**」的才交給模型——`missing-text` 是唯一那一種。
+  const noText = '{"kind":"narration"}'
+  const noTextFixed = exportsObject.__display.repair(noText, parse(noText).problems)
+  assert.equal(noTextFixed.log.length, 0, '沒有內容可修')
+  assert.equal(noTextFixed.deferred.length, 1, '要列進交給模型')
+  assert.equal(noTextFixed.deferred[0].kind, 'missing-text')
+
+  // ⚠️ `acceptable` 的那些**不該**佔用模型的呼叫（它們已經降級處理過了）。
+  const extraKey = '{"kind":"narration","text":"x","mood":"開心"}'
+  assert.equal(
+    exportsObject.__display.repair(extraKey, parse(extraKey).problems).deferred.length,
+    0,
+    '可接受的問題不必修、也不必交給模型',
+  )
+
+  // 4. 標籤名的邊界：`<n>` **不可以**在 `<note>` 裡命中。
+  //    （SillyTavern 的 `matchWholeWords` 對中文壞掉是同型問題，見 plan.md §5 第 8 條）
+  assert.equal(
+    parse('<note>這不是短標記</note>', { markers: [{ tag: 'n', kind: 'narration' }] }).nodes[0].source,
+    'plain',
+    '短標籤不該在長標籤裡命中',
+  )
+
+  // 5. 壞輸入不該讓整個面板爆掉（同 §7.4b 那個型別的 bug）。
+  for (const bad of ['', null, undefined, 123]) {
+    assert.deepEqual(parse(bad).nodes, [], `壞輸入要回空節點樹：${String(bad)}`)
+  }
+  assert.deepEqual(parse('沒有標記也沒有引號').nodes[0].kind, 'narration', '一般文字就是旁白')
+
+  console.log('4j. 顯示解析 OK — 推斷優先、標記可混用、走樣不會吃掉後面的訊息')
 }
 
 /* ----------------- 設定頁文案要跟上功能（實測被抓到的缺口）----------------- */
@@ -1131,8 +1634,34 @@ function spyRpc(seen, extra) {
   const createCall = /rpc\(\s*'character\.create'\s*,\s*\{([^}]*)\}/.exec(source)
   assert.match(createCall[1], /name\s*:/, 'character.create 要用 name 傳名稱')
 
-  // 設定頁要把酒館 id 傳進人物卡分區
-  assert.ok(source.includes('tavernId: activeTavern === null'), '設定頁要把 tavernId 傳進人物卡分區')
+  // 設定頁要把酒館 id 傳進人物卡分區。
+  //
+  // ⚠️ 這一條以前是掃原始碼字串（`tavernId: activeTavern === null`）：驗的是**寫法**，
+  // 所以純重構（把重複三次的算式抽成一個區域變數）就會讓它變紅，而行為其實一樣。
+  // 現在改成**真的渲染一次、檢查子元件拿到的 props**——那是這一條真正想講的事。
+  Object.assign(exportsObject.__testSeed, {
+    loaded: true,
+    taverns: [{ id: 'tv-77', name: '測試酒館', active: true, exists: true, scaffolded: true }],
+    activeId: 'tv-77',
+    characters: [],
+    summary: { name: 'tavern', counts: {}, files: [], layout: [] },
+    settings: { name: '測試酒館', note: '' },
+  })
+  reactImpl.resetHooks()
+  exportsObject.__setZone('cast')
+  const castTree = renderComponent(TavernSettingsPage, {})
+  const gotId = collect(castTree, (el) => el.props !== undefined && el.props.tavernId !== undefined)
+  assert.ok(gotId.length >= 1, '人物卡分區要收到 tavernId')
+  assert.equal(
+    gotId[0].props.tavernId,
+    'tv-77',
+    '傳進分區的要是**目前這間酒館的 id**，不是空字串或別間',
+  )
+  reactImpl.resetHooks()
+  exportsObject.__setZone('hall')
+  for (const key of ['taverns', 'activeId', 'characters', 'summary', 'settings']) {
+    delete exportsObject.__testSeed[key]
+  }
 
   console.log('4c. op 參數 OK — chat.create 與四個 character.* 都帶了酒館 id')
 }
@@ -1906,7 +2435,70 @@ function spyRpc(seen, extra) {
   assert.equal(themeTokens()['surface-0'], '#f5f6fa', '淺色基底要換掉底色')
   applyTheme(null, darkDefaults, lightDefaults)
 
-  // ⚠️ **色票一定要過對比**。這一條用 WCAG 相對亮度公式**實算**（不是估的）：
+  /* --- `style.bubble` 與 `custom.css`（2.6.0 的「裝修」）--------------------- */
+
+  // 列舉的驗證在 `lib/theme.js`：**打錯字要回報，不是默默用預設**。
+  assert.deepEqual(
+    themeModule.normalizeTheme(null).style,
+    { bubble: 'bubble' },
+    '沒有 style 時要有一組預設',
+  )
+  assert.deepEqual(
+    themeModule.normalizeTheme({ style: { bubble: 'paper' } }).style,
+    { bubble: 'paper' },
+    '合法的值要留下來',
+  )
+  const badStyle = themeModule.normalizeTheme({ style: { bubble: 'buble' } })
+  assert.deepEqual(badStyle.style, { bubble: 'bubble' }, '打錯的值要落回預設')
+  assert.ok(badStyle.dropped.includes('style.bubble'), '打錯的值要回報（不然使用者不知道沒生效）')
+  assert.ok(
+    themeModule.normalizeTheme({ style: { 亂寫: 'x' } }).dropped.includes('style.亂寫'),
+    '不認得的 style key 也要回報',
+  )
+
+  // 四種樣式都要有一組完整的變數——少一個就會有 `var()` 是空的。
+  const styleNames = Object.keys(exportsObject.__chat.BUBBLE_STYLE_VARS)
+  assert.deepEqual(styleNames.sort(), ['bubble', 'paper', 'plain', 'tail'], '四種樣式')
+  const varNames = Object.keys(exportsObject.__chat.BUBBLE_STYLE_VARS.bubble).sort()
+  for (const name of styleNames) {
+    assert.deepEqual(
+      Object.keys(exportsObject.__chat.BUBBLE_STYLE_VARS[name]).sort(),
+      varNames,
+      `${name} 的變數要跟其他樣式一樣多（不然會有一項是空的）`,
+    )
+  }
+
+  // 選了樣式 → 那一層 CSS 真的跟著換（**不必**在畫面上掛任何 class）。
+  applyTheme({ base: 'dark', tokens: {}, style: { bubble: 'plain' } }, darkDefaults, lightDefaults)
+  assert.equal(exportsObject.__chat.currentStyle().bubble, 'plain', '目前樣式要記下來')
+  assert.ok(
+    themeTokensCss().includes('--dsh-tv-bubble-bg: transparent'),
+    'plain：氣泡底色要變透明',
+  )
+  applyTheme({ base: 'dark', tokens: {}, style: { bubble: 'tail' } }, darkDefaults, lightDefaults)
+  assert.ok(themeTokensCss().includes('--dsh-tv-bubble-tail: block'), 'tail：尾巴要打開')
+  applyTheme(null, darkDefaults, lightDefaults)
+  assert.ok(
+    themeTokensCss().includes('--dsh-tv-bubble-tail: none'),
+    '沒有 style 時要落回預設（尾巴關著）',
+  )
+  assert.ok(
+    themeTokensCss().includes('--dsh-tv-surface-2'),
+    '預設樣式要沿用 token，不是寫死顏色',
+  )
+
+  // `custom.css`：**一定要包 `@scope`**，不然使用者的 `* {…}` 會污染整個宿主
+  // （SillyTavern 的前例，`design-language.md` §0）。
+  const scopeCss = exportsObject.__chat.scopeCustomCss
+  assert.equal(scopeCss(''), '', '沒有 custom.css 時不要注入一個空的 @scope 區塊')
+  assert.equal(scopeCss(null), '', 'null 也要能接受')
+  const wrapped = scopeCss('  .dsh-tv-bubble { border-radius: 0 }  ')
+  assert.ok(
+    wrapped.startsWith('@scope (.dsh-tv-view) {'),
+    '一定要包 @scope (.dsh-tv-view)——不然它碰得到宿主的 DOM',
+  )
+  assert.ok(wrapped.includes('.dsh-tv-bubble { border-radius: 0 }'), '內容原樣保留（只去頭尾空白）')
+  assert.ok(wrapped.trimEnd().endsWith('}'), '區塊要收好')
   // 研究報告的三組色票之所以能直接抄，就是因為每個值都算過。
   // 以後有人調色票，這裡會直接紅——不會靜默變成「深字壓深底」。
   {
@@ -1986,11 +2578,33 @@ function spyRpc(seen, extra) {
       false,
       '不要用 ch 量中文行長（`ch` 是「0」的寬度）',
     )
-    // 泡泡不可以是飽和色（Character.AI 的無障礙實證）
+    // 泡泡不可以是飽和色（Character.AI 的無障礙實證）。
+    //
+    // ⚠️ 2.6.0 之後氣泡的顏色是 `style.bubble` 推導出來的變數（`--dsh-tv-bubble-bg`），
+    // 所以 CSS 的字面只是 `var(…, fallback)`——**要看的是每一組樣式的實際值**，
+    // 不然這條斷言只驗到「有寫 var」，驗不到「用的是低彩度色」。
+    const bubbleVars = exportsObject.__chat.BUBBLE_STYLE_VARS
+    const lowChroma = (value) =>
+      value === 'transparent' || /var\(--dsh-tv-(surface-[0-3]|accent-soft)\)/.test(value)
+    for (const name of Object.keys(bubbleVars)) {
+      for (const key of ['bubble-bg', 'bubble-me-bg']) {
+        const value = bubbleVars[name][key]
+        assert.ok(
+          lowChroma(value),
+          `${name}.${key} 要用表面階梯或極淡的 accent-soft（低彩度），不要飽和填色——實際是 ${value}`,
+        )
+        assert.equal(
+          /#[0-9a-fA-F]{3,8}/.test(value),
+          false,
+          `${name}.${key} 不可以寫死 hex（theme.json 才換得動）`,
+        )
+      }
+    }
+    // 還沒讀到主題之前跑的是 CSS 的 fallback，那一個也必須是低彩度的。
     assert.match(
       source,
-      /\.dsh-tv-bubble\{[^}]*border:1px solid var\(--dsh-tv-line\)/,
-      '泡泡用表面階梯的低彩度色，不用飽和填色',
+      /\.dsh-tv-bubble\{[^}]*var\(--dsh-tv-surface-2\)/,
+      '泡泡底色的 fallback 也要是表面階梯（第一次開啟時不能是飽和色）',
     )
     console.log('16. 敘事體排版 OK — 四種文字分類、關掉合成斜體、中文行距與行長')
   }
@@ -2049,8 +2663,25 @@ function spyRpc(seen, extra) {
   // 這個 repo 從來沒有用過對話框（側邊欄在最底部，彈窗會被裁掉）。
   assert.equal(/\bwindow\.confirm\b/.test(codeSource), false, '不要用 window.confirm 當確認')
 
-  // 入口要畫得出來（空清單時是引導文字，所以看分區標題）。
-  assert.ok(flatten(renderComponent(TavernSettingsPage, {})).includes('對話紀錄'), '設定頁要有對話紀錄分區')
+  // 入口要畫得出來：刪除鈕住在「💬 包廂」那一區。
+  //
+  // ⚠️ 這裡**要真的餵一間酒館**。舊版直接渲染並斷言文字含「對話紀錄」，但當時
+  // 畫面只畫了「還沒有選定酒館」，而那段說明文字本身就有「對話紀錄」——
+  // 斷言一直是綠的，卻什麼都沒驗到（同型的問題見 4f）。
+  Object.assign(exportsObject.__testSeed, {
+    loaded: true,
+    taverns: [{ id: 'tv-1', name: '測試酒館', active: true, exists: true, scaffolded: true, icon: '🍺' }],
+    activeId: 'tv-1',
+    characters: [],
+    summary: { name: 'tavern', counts: {}, files: [], layout: [] },
+    settings: { name: '測試酒館', note: '' },
+  })
+  reactImpl.resetHooks()
+  exportsObject.__setZone('rooms')
+  assert.ok(
+    flatten(renderComponent(TavernSettingsPage, {})).includes('新對話'),
+    '💬 包廂是開新對話的地方',
+  )
 
   // 真的碰一次那顆按鈕：確認它接上了 onClick，而且**按一下不會送出 chat.delete**。
   const sent = []
@@ -2062,9 +2693,17 @@ function spyRpc(seen, extra) {
     renderComponent(TavernSettingsPage, {}),
     (el) => el.type === 'button' && el.props.title === '刪除這份對話',
   )
-  // 清單是空的，所以這裡應該找不到按鈕（上面那條渲染斷言已經確認分區在）。
+  // 清單是非同步載入的，而假 React 的 `useEffect` 不會跑，所以列在離線測試裡
+  // 永遠是空的（`plan.md` §7.6）。這裡驗的是「空清單不會畫出刪除鈕、也不會送 op」。
   assert.equal(buttons.length, 0, '沒有對話時不該畫出刪除鈕')
   assert.equal(sent.filter((one) => one.op === 'chat.delete').length, 0, '渲染不該送出 chat.delete')
+
+  // 還原：後面的段落不該拿到這裡的種子與分區。
+  reactImpl.resetHooks()
+  exportsObject.__setZone('hall')
+  for (const key of ['taverns', 'activeId', 'characters', 'summary', 'settings']) {
+    delete exportsObject.__testSeed[key]
+  }
   console.log('11. 刪除對話 OK — 二段確認、chat.delete 的三個參數、沒有對話框')
 }
 

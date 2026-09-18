@@ -1,0 +1,7 @@
+{
+  "markers": [
+    { "tag": "台詞", "kind": "speech" },
+    { "tag": "心聲", "kind": "thought" },
+    { "tag": "面板", "kind": "data" }
+  ]
+}

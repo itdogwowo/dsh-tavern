@@ -1,0 +1,5 @@
+{"chat_metadata":{},"user_name":"你","character_name":"老闆娘"}
+{"name":"你","is_user":true,"is_system":false,"send_date":"2026-09-18T21:00:00Z","mes":"你終於來了。"}
+{"name":"老闆娘","is_user":false,"is_system":false,"send_date":"2026-09-18T21:00:05Z","mes":"（她把抹布放下，檯面擦到一半。）\n\n<台詞 who=\"老闆娘\">你終於來了。</台詞>\n\n她沒有看你，只是把杯子推過來。\n\n<面板>\n時間：晚上十一點\n心情：疲倦\n在場：只有你們兩個\n</面板>\n\n「坐吧，站著像什麼話。」"}
+{"name":"老闆娘","is_user":false,"is_system":false,"send_date":"2026-09-18T21:04:00Z","mes":"她把杯子收回去，擦乾。\n\n「今天不問你為什麼遲到。」\n\n（窗外的雨忽然變大。）\n\n她打了個哈欠，把燈調暗了一格。"}
+{"name":"老闆娘","is_user":false,"is_system":false,"send_date":"2026-09-18T21:09:00Z","mes":"<面板>\n心情：想睡了\n今晚的帳還沒結\n\n<台詞>你要不要先回去？</台詞>\n她說完自己先笑了。"}

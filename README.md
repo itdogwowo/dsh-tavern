@@ -177,30 +177,82 @@ v1 會自動建立／認養一間「預設酒館」。那筆紀錄到了 v2 還�
 ⋯ 選單那三顆圖示（筆／分支／垃圾桶）是自己畫的——原生那三顆住在
 `@deepseek-ai/dsh-client-ui-primitives`，而客戶端 bundle 的 `require` 只有 `react`。
 
-## 主題（每間酒館自己的外觀）
+## 裝修（每間酒館自己的外觀）
 
 介面的每一個顏色、圓角、陰影、字體都走**設計 token**（`--dsh-tv-*`），
-所以外觀可以整組換掉，不必改程式：
+所以外觀可以整組換掉，不必改程式。**兩層，從簡單到進階**：
 
 ```
-<酒館資料夾>/theme.json      ← 這間酒館的覆寫，整包帶走時外觀跟著走
+<酒館資料夾>/theme.json   ← 顏色、圓角、陰影、字體、對話框樣式（這一節）
+<酒館資料夾>/custom.css   ← 上面改不到的形狀與材質（下一節）
 ```
+
+> ⚠️ **改完要重新載入頁面（F5）。** 同一間酒館不會自動重讀——主題只在
+> 「進到這間酒館」的時候讀一次（換到別間再換回來也會重讀）。
+
+### `theme.json`
 
 ```json
 {
   "base": "dark",
+  "style": { "bubble": "paper" },
   "tokens": {
-    "accent": "#e2a45c",
-    "surface-0": "#0e1014",
-    "radius-md": "10px"
+    "surface-0": "#0B0D12",
+    "accent": "#7FA8C9",
+    "radius-md": "14px"
   }
 }
 ```
 
-- `base` 是 `dark` 或 `light`，其餘沒寫的 token 繼承基底。
-- 不認得的 token 會被忽略（不會弄壞主題）。
+- `base` 是 `dark` 或 `light`，沒寫的 token 就繼承基底。
+- **不認得的 token（包含打錯的名字）會被忽略**，而且會列在 `dropped` 裡回報——
+  不會弄壞主題，但那一行也不會生效。
 - 內建色票是「**墨水與暖光**」：深墨底、燈籠暖光當強調色。
-- 完整 token 清單與預設值在 `lib/theme.js`（`THEME_TOKENS`）。
+- 完整的 31 個 token 與預設值在 `lib/theme.js`（`THEME_TOKENS`）。
+
+**最常改的幾個**：
+
+| 想改什麼 | token |
+|---|---|
+| 主面板背景 | `surface-0` |
+| 卡片／訊息列 | `surface-1` |
+| **對話氣泡底** | `surface-2` |
+| 邊框 | `line` / `line-soft` |
+| 文字三階 | `text-1` / `text-2` / `text-3` |
+| 強調色（唯一） | `accent` / `accent-hover` / `accent-soft` |
+| **氣泡圓角** | `radius-sm` / `radius-md` / `radius-lg` / `radius-pill` |
+| 陰影 | `shadow-1` / `shadow-2` |
+| 動效時長 | `speed-fast` / `speed-slow` / `ease` |
+| 字體 | `font` / `font-reading` / `font-mono` |
+
+### `style.bubble`（對話框樣式）
+
+顏色之外，氣泡的**形狀**是另一層——token 只能換數值，換不動形狀：
+
+| 值 | 長什麼樣 |
+|---|---|
+| `bubble` | 預設。圓角氣泡，兩邊分左右 |
+| `plain` | 沒有氣泡：只有名牌與正文，像小說排版（長篇閱讀最舒服） |
+| `tail` | 氣泡帶一個指向發話者的尾巴 |
+| `paper` | 紙張感：漸層底、細邊框、內縮陰影 |
+
+### `custom.css`（進階）
+
+token 與 `style.bubble` 都改不到的（背景圖、材質、動畫、某個元件的細節），
+寫在 `<酒館資料夾>/custom.css`。
+
+它的內容會被**包在 `@scope (.dsh-tv-view)` 裡**才注入，所以它碰不到 DSH 自己的
+介面（SillyTavern 的 `* { text-shadow }` 污染整個宿主是前例）。也因為如此，
+選擇器直接寫 `.dsh-tv-xxx` 就好，**不要再加** `.dsh-tv-view` 前綴：
+
+```css
+/* custom.css */
+.dsh-tv-bubble { border: 0; border-radius: 14px }
+.dsh-tv-bubbleText { font-size: 17px }
+```
+
+⚠️ 不支援 `@scope` 的瀏覽器會**整段忽略**——那是刻意的降級（自訂樣式沒生效，
+但不會壞掉），不是相容性破口。
 
 > 改版前這個介面有 129 處寫死的顏色、7 種不一致的圓角——那時候換不了主題，
 > 因為每個元件都自己挑色。現在元件只准用 token，測試會掃。

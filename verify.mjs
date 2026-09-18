@@ -17,6 +17,7 @@
 import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
 import { extname, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { readCardFromPng } from './lib/pngcard.js'
 
 const root = resolve(import.meta.dirname)
 let failures = 0
@@ -178,6 +179,98 @@ if (existsSync(agentPath)) {
       'agent 面版本標記對得上',
       agentBuildMatch !== null && agentBuildMatch[1] === 'tavern-agent-' + manifest.version,
       agentBuildMatch === null ? '找不到 AGENT_BUILD' : agentBuildMatch[1],
+    )
+  }
+}
+
+/* --- 出貨的範例圖：不可以夾帶生成工具留下的東西 -------------------------- */
+/**
+ * `samples/` 底下的 PNG 是會被上傳到 GitHub 的出貨內容。生成式工具很喜歡在 PNG 裡
+ * 塞文字區塊（`parameters`、`Software`、`prompt`、`workflow`、XMP…）——那是**生成
+ * 參數與提示詞**，跟著圖一起公開等於把工具鏈一起送出去，而卡片本身完全不需要它們。
+ *
+ * 所以這裡走一次真正的 chunk 串列，只放行「顯示這張圖真的需要」的區塊；
+ * 文字區塊只准是卡片資料本身（`ccv3`／`chara`），那正是這張 PNG 存在的理由。
+ *
+ * 順便釘住兩件事：範例必須是**合法的 V3 卡**（`group_only_greetings` 是規格裡
+ * 寫死 MUST 的欄位），而且**PNG 裡的那份要跟旁邊的 JSON 一模一樣**——
+ * 兩份資料走樣的話，這張卡就不再是它自己宣稱的東西了。
+ */
+{
+  // 顯示用的區塊：PNG 本體、色彩空間、像素密度、透明度、ICC。其餘一律視為夾帶。
+  const ALLOWED = new Set([
+    'IHDR', 'PLTE', 'IDAT', 'IEND', 'tRNS', 'sRGB', 'gAMA', 'cHRM', 'pHYs', 'iCCP', 'sBIT', 'bKGD', 'tEXt',
+  ])
+  const CARD_KEYWORDS = new Set(['ccv3', 'chara'])
+
+  function collectPngs(dir) {
+    const out = []
+    let entries
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return out
+    }
+    for (const entry of entries) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) out.push(...collectPngs(full))
+      else if (entry.isFile() && entry.name.toLowerCase().endsWith('.png')) out.push(full)
+    }
+    return out
+  }
+
+  const images = collectPngs(join(root, 'samples'))
+  check('samples/ 底下有出貨的角色卡', images.length > 0, images.length + ' 張')
+
+  for (const image of images) {
+    const relativePath = relative(root, image)
+    const bytes = readFileSync(image)
+    const stray = []
+    const keywords = []
+    let offset = 8
+    while (offset + 8 <= bytes.length) {
+      const length = bytes.readUInt32BE(offset)
+      const type = bytes.toString('latin1', offset + 4, offset + 8)
+      if (!ALLOWED.has(type)) stray.push(type)
+      if (type === 'tEXt') {
+        const data = bytes.subarray(offset + 8, offset + 8 + length)
+        const separator = data.indexOf(0)
+        const keyword = data.subarray(0, separator < 0 ? 0 : separator).toString('latin1')
+        keywords.push(keyword)
+        if (!CARD_KEYWORDS.has(keyword.toLowerCase())) stray.push('tEXt:' + keyword)
+      }
+      offset += 12 + length
+      if (type === 'IEND') break
+    }
+    check(
+      relativePath + ' 沒有生成工具留下的區塊',
+      stray.length === 0,
+      stray.length === 0 ? '只放行顯示與卡片資料用的區塊' : '多出 ' + stray.join(', '),
+    )
+    check(
+      relativePath + ' 帶的是 V3 卡片資料（ccv3）',
+      keywords.some((keyword) => keyword.toLowerCase() === 'ccv3'),
+      keywords.join(', ') === '' ? '（沒有任何文字區塊）' : keywords.join(', '),
+    )
+
+    const sidecar = image.replace(/\.png$/iu, '.json')
+    if (!existsSync(sidecar)) continue
+    const jsonCard = JSON.parse(readFileSync(sidecar, 'utf8'))
+    check(
+      relativePath + ' 的 JSON 是 chara_card_v3',
+      jsonCard.spec === 'chara_card_v3' && jsonCard.spec_version === '3.0',
+      String(jsonCard.spec) + ' / ' + String(jsonCard.spec_version),
+    )
+    check(
+      relativePath + ' 有 V3 寫死必填的 group_only_greetings',
+      Array.isArray(jsonCard.data?.group_only_greetings),
+      Array.isArray(jsonCard.data?.group_only_greetings) ? '空陣列也可以，但不能沒有' : '缺欄位',
+    )
+    const inPng = readCardFromPng(bytes).card
+    check(
+      relativePath + ' 的 PNG 與旁邊的 JSON 內容一致',
+      JSON.stringify(inPng) === JSON.stringify(jsonCard),
+      JSON.stringify(inPng) === JSON.stringify(jsonCard) ? '' : '兩份資料走樣了',
     )
   }
 }

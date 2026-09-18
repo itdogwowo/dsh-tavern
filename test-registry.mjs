@@ -44,8 +44,8 @@ try {
     // 骨架（四個目錄 ＋ tavern.json ＋ README.txt）之後才是預設內容。
     assert.deepEqual(
       result.skeleton.slice().sort(),
-      ['characters/老闆娘.json', 'worldbooks/酒館.json'],
-      'skeleton 只回報「這次建立了什麼」，所以是預設內容那兩個檔案',
+      ['characters/老闆娘.json', 'worldbooks/輸出格式.json', 'worldbooks/酒館.json'],
+      'skeleton 只回報「這次建立了什麼」，所以是預設內容那三個檔案',
     )
     for (const part of ['characters', 'worldbooks', 'chats', 'art']) {
       assert.equal(existsSync(join(shop, part)), true, `應該建立 ${part}/`)

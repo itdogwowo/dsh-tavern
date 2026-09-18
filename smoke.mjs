@@ -53,10 +53,22 @@ ctx.webServer = {
 tavern.apply(ctx)
 assert.deepEqual(tavern.inject, ['webServer'], '宿主半只應該依賴 webServer（其餘全是檔案 I/O）')
 const rpcRoute = calls.routes.find((route) => route.path === '/api/dsh-tavern/rpc')
-const assetRoute = calls.routes.find((route) => route.path === '/api/dsh-tavern/assets/')
+const assetRoute = calls.routes.find(
+  (route) => route.kind === 'prefix' && route.path.startsWith('/api/dsh-tavern/'),
+)
 assert.ok(rpcRoute !== undefined, 'RPC 路由應已註冊')
 assert.equal(rpcRoute.kind, 'exact')
 assert.ok(assetRoute !== undefined, '插圖路由應已註冊')
+// 回歸守衛：`webServer` 的 prefix 比對是
+//   pathname === prefix || pathname.startsWith(prefix + '/')
+// 註冊字串結尾若多一個斜線，比對就變成 `startsWith('…assets//')`，
+// 於是路由註冊成功、卻永遠比對不到（所有插圖靜默 404）。
+// 這裡用真正會出現的資產 URL 形狀驗一次，而不是只比字串。
+const prefixMatches = (prefix, pathname) => pathname === prefix || pathname.startsWith(prefix + '/')
+assert.ok(
+  prefixMatches(assetRoute.path, '/api/dsh-tavern/assets/characters/角色/立繪.png'),
+  '插圖路由的註冊路徑要能比對到真實的資產 URL（結尾多一個斜線就會永遠比對不到）',
+)
 assert.equal(assetRoute.kind, 'prefix')
 console.log('1. 掛載 OK — inject =', JSON.stringify(tavern.inject), '/ 兩條路由都在')
 
@@ -230,12 +242,13 @@ function pngCard(entries) {
   const settings = JSON.parse(readFileSync(join(shop, 'tavern.json'), 'utf8'))
   assert.equal(settings.version, 1)
 
-  // 新建酒館不該是空的：附一位老闆娘與一本世界書（使用者要求）。
+  // 新建酒館不該是空的：附一位老闆娘、一本世界書、以及**輸出格式**（使用者要求）。
   assert.equal(existsSync(join(shop, 'characters', '老闆娘.json')), true, '應該附一張老闆娘')
   assert.equal(existsSync(join(shop, 'worldbooks', '酒館.json')), true, '應該附一本世界書')
+  assert.equal(existsSync(join(shop, 'worldbooks', '輸出格式.json')), true, '應該附輸出格式（預設，不是選配）')
   assert.deepEqual(
     added.value.skeleton.slice().sort(),
-    ['characters/老闆娘.json', 'worldbooks/酒館.json'],
+    ['characters/老闆娘.json', 'worldbooks/輸出格式.json', 'worldbooks/酒館.json'],
     'skeleton 要回報實際建立了什麼：' + added.value.skeleton.join(' '),
   )
   console.log('4. 新增酒館 OK — 建立', added.value.skeleton.join(' '))
@@ -280,8 +293,8 @@ function pngCard(entries) {
   assert.equal(JSON.parse(readFileSync(join(shop, 'tavern.json'), 'utf8')).note, '筆記')
 
   const summary = await callRpc('workspace')
-  // 1 張預設老闆娘 ＋ 1 張測試角色；世界書同理。
-  assert.deepEqual(summary.value.counts, { characters: 2, worldbooks: 2, chats: 1, art: 0 })
+  // 1 張預設老闆娘 ＋ 1 張測試角色；世界書同理（酒館 ＋ 輸出格式 ＋ 測試用那一本）。
+  assert.deepEqual(summary.value.counts, { characters: 2, worldbooks: 3, chats: 1, art: 0 })
   assert.equal(summary.value.settings.note, '筆記', 'workspace 要順便帶回這間酒館的設定')
   console.log('5. 檔案 API OK —', JSON.stringify(summary.value.counts))
 }

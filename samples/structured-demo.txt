@@ -1,0 +1,14 @@
+{"kind":"narration","text":"她抬起頭，把抹布放下。"}
+{"kind":"speech","who":"老闆娘","text":"你終於來了。"}
+{"kind":"action","text":"她把杯子推過來。"}
+{"kind":"thought","text":"他今天不太一樣。"}
+{"kind":"panel","text":"時間：晚上十一點\n心情：疲倦"}
+
+—— 以下刻意走樣 ——
+{"kind":"speech","who":"老闆娘","text":"你要不要先坐一下"
+{"kind":"speach","text":"kind 打錯字"}
+{"who":"老闆娘","text":"少了 kind"}
+{"kind":"narration"}
+{"kind":"narration","text":"多了一個欄位","mood":"開心"}
+這一行不是 JSON，走推斷。
+「這一行有引號，也走推斷。」
