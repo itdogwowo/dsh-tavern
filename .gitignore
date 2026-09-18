@@ -16,3 +16,10 @@ desktop.ini
 *.tmp
 coverage/
 *.png
+
+# 個資：本機專用，絕對不進版控
+# 黑名單本身就是機密——把公司名寫進公開檔案來防外洩是自相矛盾的。
+# 見 docs/privacy-runbook.md 第 2.2 節。
+.privacy-denylist.txt
+AGENTS.local.md
+CLAUDE.local.md

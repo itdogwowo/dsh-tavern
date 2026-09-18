@@ -198,9 +198,22 @@ if (existsSync(agentPath)) {
  * 掃描範圍：repo 底下的文字檔（`.md`/`.js`/`.mjs`/`.json`/`.yml`/`.txt`），
  * 跳過 `.git` 與 `node_modules`。樣板寫法（`<你>`、`<user>`）不算——
  * 那正是我們要推廣的寫法。
+ *
+ * 兩層掃描：
+ *   A. **家目錄形狀的路徑**（`/Users/<名字>`、`/home/<名字>`、`C:\Users\<名字>`）
+ *   B. **本地黑名單** `.privacy-denylist.txt`（已 gitignore，可選）
+ *      A 抓不到公司名／專案名，而實際發生過的那次洩漏正是這一類。
+ * 完整說明與事故處理步驟見 `docs/privacy-runbook.md`。
  */
 {
   const SKIP_DIRS = new Set(['.git', 'node_modules'])
+  /**
+   * 這三個檔案**不掃**，原因各不相同但都成立：
+   *   - `.privacy-denylist.txt` 就是黑名單本身，掃它必定命中自己
+   *   - `AGENTS.local.md` / `CLAUDE.local.md` 是 gitignored 的個人覆蓋層
+   * 共同理由：**掃一個不可能被 commit 的檔案沒有意義**。
+   */
+  const SKIP_FILES = new Set(['.privacy-denylist.txt', 'AGENTS.local.md', 'CLAUDE.local.md'])
   const TEXT_EXT = new Set(['.md', '.js', '.mjs', '.json', '.yml', '.yaml', '.txt'])
   // 家目錄的形狀：macOS／Linux 的 /Users/<名字>、/home/<名字>，Windows 的 C:\Users\<名字>。
   // `[^/\s...<>]` 這個字元類別**刻意排除 `<` 與 `>`**，所以 `<你>` 這種樣板不會誤判。
@@ -210,7 +223,12 @@ if (existsSync(agentPath)) {
     /[A-Za-z]:\\Users\\([^\\\s`'")<>[\]]+)/g,
   ]
 
-  const leaks = []
+  /** 命中處太多時不要洗版，只報前 8 個。 */
+  const describeHits = (hits) =>
+    hits.slice(0, 8).join(' | ') + (hits.length > 8 ? ` …共 ${String(hits.length)} 處` : '')
+
+  // 兩個掃描共用一次走訪。這裡只留行陣列（不留整份字串），35 個檔案綽綽有餘。
+  const textFiles = []
   const walk = (dir) => {
     let entries
     try {
@@ -219,7 +237,7 @@ if (existsSync(agentPath)) {
       return
     }
     for (const entry of entries) {
-      if (SKIP_DIRS.has(entry.name)) continue
+      if (SKIP_DIRS.has(entry.name) || SKIP_FILES.has(entry.name)) continue
       const path = join(dir, entry.name)
       if (entry.isDirectory()) {
         walk(path)
@@ -232,24 +250,66 @@ if (existsSync(agentPath)) {
       } catch {
         continue
       }
-      const lines = text.split('\n')
-      for (let i = 0; i < lines.length; i += 1) {
-        for (const pattern of HOME_SHAPED) {
-          pattern.lastIndex = 0
-          if (pattern.test(lines[i])) {
-            leaks.push(`${relative(root, path)}:${String(i + 1)}`)
-            break
-          }
+      textFiles.push({ rel: relative(root, path), lines: text.split('\n') })
+    }
+  }
+  walk(root)
+
+  /* --- 掃描 A：家目錄形狀的路徑 ----------------------------------------- */
+  const leaks = []
+  for (const file of textFiles) {
+    for (let i = 0; i < file.lines.length; i += 1) {
+      for (const pattern of HOME_SHAPED) {
+        pattern.lastIndex = 0
+        if (pattern.test(file.lines[i])) {
+          leaks.push(`${file.rel}:${String(i + 1)}`)
+          break
         }
       }
     }
   }
-  walk(root)
-  check(
-    '文件與程式碼裡沒有真實的使用者名稱／本機絕對路徑',
-    leaks.length === 0,
-    leaks.slice(0, 8).join(' | ') + (leaks.length > 8 ? ` …共 ${String(leaks.length)} 處` : ''),
-  )
+  check('文件與程式碼裡沒有真實的使用者名稱／本機絕對路徑', leaks.length === 0, describeHits(leaks))
+
+  /* --- 掃描 B：本地黑名單 ----------------------------------------------- */
+  /**
+   * 掃描 A 只認得「家目錄形狀」，**抓不到公司名／內部專案名**——而實際發生過的
+   * 那一次洩漏正是後者（側邊欄的工作區名稱被貼進 README 的示意圖），
+   * 掃描 A 放它過了。這一層補上那個洞。
+   *
+   * 黑名單放在 `.privacy-denylist.txt`（**已 gitignore**，一行一個詞，
+   * `#` 開頭是註解）。它不進版控是刻意的：**黑名單本身就是機密**，
+   * 把公司名寫進一個公開檔案來防止公司名外洩是自相矛盾的。
+   * 代價是兩台機器要各建一份（見 docs/privacy-runbook.md 第 4 節）。
+   *
+   * 沒有這個檔案時顯示「略過」而不是失敗：新 clone 的人不該因為沒有你的
+   * 私人黑名單而跑不過檢查。
+   *
+   * 比對**不分大小寫**：隱私防線寧可多抓（誤判看得到 `檔案:行號`，改清單就好），
+   * 也不要漏掉「同一個名字大小寫不同」這種差異。
+   */
+  const denylistPath = join(root, '.privacy-denylist.txt')
+  const denylist = existsSync(denylistPath)
+    ? readFileSync(denylistPath, 'utf8')
+        .split(/\r?\n/)
+        .map((line) => line.trim().toLowerCase())
+        .filter((line) => line !== '' && !line.startsWith('#'))
+    : []
+
+  if (denylist.length === 0) {
+    console.log('  ⏭️  個資黑名單：略過（沒有 .privacy-denylist.txt，或裡面沒有詞）')
+  } else {
+    const hits = []
+    for (const file of textFiles) {
+      for (let i = 0; i < file.lines.length; i += 1) {
+        const line = file.lines[i].toLowerCase()
+        const index = denylist.findIndex((term) => line.includes(term))
+        // ⚠️ 只報「檔案:行號（第幾個詞）」而**不報命中哪個詞**：黑名單是機密，
+        // 而檢查失敗的輸出最常被整段貼進對話或 issue。
+        if (index >= 0) hits.push(`${file.rel}:${String(i + 1)} (#${String(index + 1)})`)
+      }
+    }
+    check(`個資黑名單沒有命中（${String(denylist.length)} 個詞）`, hits.length === 0, describeHits(hits))
+  }
 }
 
 /* --- realpath 提醒 ------------------------------------------------------- */
