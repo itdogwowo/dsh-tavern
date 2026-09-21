@@ -1056,8 +1056,8 @@ function spyRpc(seen, extra) {
   const labels = exportsObject.__zones.map((one) => one.label)
   assert.deepEqual(
     labels,
-    ['🏠 大廳', '💬 包廂', '🎭 卡司', '📖 藏書'],
-    '四個分區的名字要跟 redesign.md §3.2 一致',
+    ['🏠 大廳', '💬 包廂', '🎭 卡司', '📖 藏書', '⚙️ 設定'],
+    '五個分區：設定自成一個（使用者：「設定放進去其他地方，新開一張分頁」）',
   )
 
   const renderZone = (key) => {
@@ -1114,26 +1114,31 @@ function spyRpc(seen, extra) {
   const hallText = flatten(hallTree)
 
   // 「移除」是破壞性動作，不可以跟「重新命名」並排——它要躲在收合的「進階」後面。
-  assert.ok(hallText.includes('進階'), '🏠 大廳要有「進階」開關')
+  // ⚠️ 這一段現在住在 **⚙️ 設定** 分區，不在大廳：使用者要的是「大廳看起來像一間
+  // 真的酒館，而不是一堆設定集」，所以設定整個搬出去了。
+  reactImpl.resetHooks()
+  exportsObject.__setZone('settings')
+  const settingsText = flatten(renderComponent(TavernSettingsPage, {}))
+  assert.ok(settingsText.includes('進階'), '⚙️ 設定要有「進階」開關')
   assert.equal(
-    hallText.includes('從酒館街移除'),
+    settingsText.includes('從酒館街移除'),
     false,
     '破壞性動作預設不可以攤在畫面上，要收在「進階」裡',
   )
 
-  // 快速入口要**帶著數量**，而且要真的跳得過去。
+  // 底部那三個入口按鈕**拿掉了**（使用者：「最下低那層不需要」），換成真的房間清單
+  // （`HallRooms`）。那個清單的資料要 `chat.list`，而載入住在 `useEffect`——
+  // 離線的假 React 不跑 effect，所以這裡只驗「換掉了」與「沒有資料時畫得出東西」。
   const quick = collect(
     hallTree,
     (el) => el.type === 'button' && el.props.className === 'dsh-tv-quickBtn',
   )
-  assert.equal(quick.length, 3, '快速入口三個：包廂／卡司／藏書')
-  assert.ok(hallText.includes('4 份對話'), '快速入口要顯示對話數量（來自 summary.counts）')
-  quick[0].props.onClick()
-  assert.equal(exportsObject.__currentZone(), 'rooms', '按快速入口要真的切到那一區')
+  assert.equal(quick.length, 0, '大廳不該再有那三個快速入口按鈕')
+  assert.ok(hallText.includes('房間'), '大廳要有「房間」那一段（真的對話清單）')
 
-  // 展開之後才看得到——這一條是「收合」的定義。
+  // 展開之後才看得到——這一條是「收合」的定義（同樣在 ⚙️ 設定）。
   reactImpl.resetHooks()
-  exportsObject.__setZone('hall')
+  exportsObject.__setZone('settings')
   const toggles = collect(
     renderComponent(TavernSettingsPage, {}),
     (el) => el.type === 'button' && el.props.className === 'dsh-tv-advToggle',
