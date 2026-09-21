@@ -18,6 +18,7 @@ import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
 import { extname, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { readCardFromPng } from './lib/pngcard.js'
+import { sampleCard } from './lib/defaults.js'
 
 const root = resolve(import.meta.dirname)
 let failures = 0
@@ -193,8 +194,8 @@ if (existsSync(agentPath)) {
  * 文字區塊只准是卡片資料本身（`ccv3`／`chara`），那正是這張 PNG 存在的理由。
  *
  * 順便釘住兩件事：範例必須是**合法的 V3 卡**（`group_only_greetings` 是規格裡
- * 寫死 MUST 的欄位），而且**PNG 裡的那份要跟旁邊的 JSON 一模一樣**——
- * 兩份資料走樣的話，這張卡就不再是它自己宣稱的東西了。
+ * 寫死 MUST 的欄位），而且**內嵌的那份資料要跟 `defaults.js` 的 `sampleCard()`
+ * 一模一樣**——那是唯一的來源，走樣的話這張卡就不再是它自己宣稱的東西。
  */
 {
   // 顯示用的區塊：PNG 本體、色彩空間、像素密度、透明度、ICC。其餘一律視為夾帶。
@@ -253,24 +254,30 @@ if (existsSync(agentPath)) {
       keywords.join(', ') === '' ? '（沒有任何文字區塊）' : keywords.join(', '),
     )
 
-    const sidecar = image.replace(/\.png$/iu, '.json')
-    if (!existsSync(sidecar)) continue
-    const jsonCard = JSON.parse(readFileSync(sidecar, 'utf8'))
+    // 卡片資料**只有一個住處：PNG 裡的那一份**。
+    //
+    // 以前旁邊還放一份 `.json`「給人看、給 git diff」。那只對人類有用，卻讓
+    // 「PNG 是交換格式、`characters/<id>.json` 才是儲存格式」這件事在範例資料夾裡
+    // 看起來自相矛盾（使用者就是看到那個才問「你好像是分開儲存」）。所以拿掉了，
+    // 現在比對的是**唯一來源**。
+    const card = readCardFromPng(bytes).card
     check(
-      relativePath + ' 的 JSON 是 chara_card_v3',
-      jsonCard.spec === 'chara_card_v3' && jsonCard.spec_version === '3.0',
-      String(jsonCard.spec) + ' / ' + String(jsonCard.spec_version),
+      relativePath + ' 讀出來是 chara_card_v3',
+      card.spec === 'chara_card_v3' && card.spec_version === '3.0',
+      String(card.spec) + ' / ' + String(card.spec_version),
     )
     check(
       relativePath + ' 有 V3 寫死必填的 group_only_greetings',
-      Array.isArray(jsonCard.data?.group_only_greetings),
-      Array.isArray(jsonCard.data?.group_only_greetings) ? '空陣列也可以，但不能沒有' : '缺欄位',
+      Array.isArray(card.data?.group_only_greetings),
+      Array.isArray(card.data?.group_only_greetings) ? '空陣列也可以，但不能沒有' : '缺欄位',
     )
-    const inPng = readCardFromPng(bytes).card
+    const expected = sampleCard()
     check(
-      relativePath + ' 的 PNG 與旁邊的 JSON 內容一致',
-      JSON.stringify(inPng) === JSON.stringify(jsonCard),
-      JSON.stringify(inPng) === JSON.stringify(jsonCard) ? '' : '兩份資料走樣了',
+      relativePath + ' 內嵌的資料與 defaults.js 的 sampleCard() 一致',
+      JSON.stringify(card) === JSON.stringify(expected),
+      JSON.stringify(card) === JSON.stringify(expected)
+        ? ''
+        : '走樣了——用 `node build-sample.mjs <來源圖.png>` 重新產生',
     )
   }
 }

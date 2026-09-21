@@ -37,11 +37,18 @@ const card = sampleCard()
 const dir = join('samples', 'characters')
 mkdirSync(dir, { recursive: true })
 
-const jsonPath = join(dir, `${DEFAULT_CHARACTER_ID}.json`)
+/**
+ * ⚠️ **只產生一個檔案。**
+ *
+ * 卡片資料住在 PNG 裡（`ccv3` 區塊，base64）。以前這裡還會多寫一份 `.json`
+ * 「給人看、給 git diff」，但那讓範例資料夾看起來像「分開儲存」——這個插件的
+ * 立場正好相反：**PNG 是交換格式，`characters/<id>.json` 才是儲存格式**
+ * （見 docs/design-comparison.md）。範例是「一張可以拿去匯入的卡」，所以它就該是
+ * 一個檔案。要看內容請看 `lib/defaults.js` 的 `sampleCard()`（唯一來源），
+ * `verify.mjs` 會盯著 PNG 裡的那份與它一致。
+ */
 const pngPath = join(dir, `${DEFAULT_CHARACTER_ID}.png`)
 
-// 縮排兩格：這一份是給人看的，也是 V3 格式在 repo 裡的可讀樣本。
-writeFileSync(jsonPath, `${JSON.stringify(card, null, 2)}\n`)
 // V3 的區塊關鍵字是 `ccv3`（規格寫死 MUST）。寫入端只接區塊，不動像素。
 const png = writeCardIntoPng(bytes, card, { keyword: 'ccv3' })
 writeFileSync(pngPath, png)
@@ -51,7 +58,6 @@ const back = readCardFromPng(png)
 console.log(
   JSON.stringify(
     {
-      json: jsonPath,
       png: pngPath,
       sourceBytes: bytes.length,
       cardBytes: png.length,

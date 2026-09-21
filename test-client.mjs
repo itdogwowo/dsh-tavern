@@ -1235,6 +1235,165 @@ function spyRpc(seen, extra) {
   console.log('4h. 卡司 OK — 海報牆（有圖／沒圖）、點進編輯器、返回鍵回得去')
 }
 
+/* ---------- 💬 包廂：開新對話＝一張設定卡（跟誰／名稱／開場白）---------- */
+
+{
+  const cardOf = (id, name, firstMes, alternates) => ({
+    id,
+    file: id + '.json',
+    // 磁碟上是 SillyTavern 的信封，而 `character.list` 回來的形狀並不保證拆過——
+    // 開場白讀的是 `data.first_mes`，所以這一條同時在驗「信封有被拆開」。
+    card: {
+      spec: 'chara_card_v2',
+      spec_version: '2.0',
+      data: { name, first_mes: firstMes, alternate_greetings: alternates },
+    },
+    assets: {
+      items: [{ name: 'a.png', url: '/api/dsh-tavern/assets/character/' + id + '/a.png' }],
+      primary: 'a.png',
+      owner: id,
+    },
+  })
+  Object.assign(exportsObject.__testSeed, {
+    loaded: true,
+    taverns: [{ id: 'tv-1', name: '測試酒館', active: true, exists: true, scaffolded: true }],
+    activeId: 'tv-1',
+    characters: [
+      cardOf('老闆娘', '老闆娘', '門上的銅鈴響了一聲。', ['外頭在下雨。']),
+      cardOf('酒保', '酒保', '他擦著杯子。', []),
+    ],
+    summary: { name: 'tavern', counts: { characters: 2 }, files: [], layout: [] },
+    settings: { name: '測試酒館', note: '' },
+  })
+
+  const seen = []
+  // 「建立完要跳進那份對話」是可驗的：切換主面板走 `layout.selectPanel(key)`，
+  // 所以在測試裡放一個假的 layout 服務，看它有沒有被叫、被叫去哪裡。
+  const panels = []
+  exportsObject.__chat.setContext({
+    get: (key) => (key === 'layout' ? { selectPanel: (name) => panels.push(name) } : undefined),
+  })
+  spyRpc(seen, {
+    'character.list': () => exportsObject.__testSeed.characters,
+    // 回音：`chat.create` 回傳的名字才是真正用的（撞名會換編號），
+    // 所以讓 mock 照著 args 回，才驗得到「append 用的是回傳值」。
+    'chat.create': (args) => ({ character: args.character, name: args.name, file: args.name + '.jsonl' }),
+  })
+
+  // ⚠️ 重繪**不可以** `resetHooks()`。
+  //
+  // `MapChatFiles` 的狀態住在 `React.useRef` 裡（`ref.current` 只在第一次填），
+  // 而重置 hook 槽等於把那個 ref 清掉——`picking` 會跟著歸零，表單永遠打不開。
+  // 這一條踩過：斷言說「每張卡都要是一張可以選的海報」，拿到的是空陣列。
+  const renderRooms = () => {
+    exportsObject.__setZone('rooms')
+    return renderComponent(TavernSettingsPage, { tavernId: 'tv-1' })
+  }
+  const byLabel = (tree, label) =>
+    collect(tree, (el) => el.props !== undefined && el.props.children === label)[0]
+  const posterOf = (tree, name) =>
+    collect(
+      tree,
+      (el) => el.type === 'button' && el.props.title === name && el.props['aria-pressed'] !== undefined,
+    )[0]
+  const nameField = (tree) =>
+    collect(tree, (el) => el.type === 'input' && el.props['aria-label'] === '對話名稱')[0]
+  const openForm = async () => {
+    byLabel(renderRooms(), '＋ 新對話').props.onClick()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    return renderRooms()
+  }
+
+  reactImpl.resetHooks()
+
+  // 1. 表單：一張卡一張海報，預設選第一張。
+  let form = await openForm()
+  const picks = collect(
+    form,
+    (el) => el.type === 'button' && el.props['aria-pressed'] !== undefined,
+  )
+  assert.deepEqual(picks.map((one) => one.props.title), ['老闆娘', '酒保'], '每張卡都要是一張可以選的海報')
+  assert.match(picks[0].props.className, /dsh-tv-posterOn/, '預設要選第一張卡')
+  assert.equal(picks[1].props.className.includes('dsh-tv-posterOn'), false, '沒選到的不能也亮著')
+  // 有圖用圖、沒圖用佔位符——跟卡司的海報牆同一套。
+  assert.equal(collect(form, (el) => el.props.className === 'dsh-tv-posterArt').length, 2, '兩張卡都有主圖')
+
+  // 2. 名稱要跟著卡片走。
+  assert.equal(nameField(form).props.value, '老闆娘', '名稱預設跟卡片名')
+
+  // 3. 開場白：卡片的第一則 ＋ 其他 1 ＋ 不要開場白。
+  assert.ok(byLabel(form, '卡片的第一則') !== undefined, '要有卡片的第一則開場白')
+  assert.ok(byLabel(form, '其他 1') !== undefined, 'alternate_greetings 要列出來')
+  assert.ok(byLabel(form, '不要開場白') !== undefined, '要能選「不要開場白」')
+  assert.ok(flatten(form).includes('門上的銅鈴響了一聲。'), '要顯示目前選的開場白內容（預覽）')
+
+  // 4. 換開場白 → 預覽跟著換。
+  byLabel(form, '其他 1').props.onClick()
+  form = renderRooms()
+  assert.ok(flatten(form).includes('外頭在下雨。'), '換一則開場白，預覽要跟著換')
+
+  // 5. 換卡 → 名稱跟著換（還沒被手改過）、開場白退回第一則、選項數量跟著卡片。
+  posterOf(form, '酒保').props.onClick()
+  form = renderRooms()
+  assert.equal(nameField(form).props.value, '酒保', '換卡要把「還沒改過」的名稱一起換掉')
+  assert.ok(flatten(form).includes('他擦著杯子。'), '換卡要把開場白退回第一則')
+  assert.equal(byLabel(form, '其他 1'), undefined, '酒保沒有 alternate_greetings，就不該有「其他 1」')
+
+  // 6. 建立 → 先開檔，再把開場白寫成第一則訊息。
+  byLabel(form, '建立對話').props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  let create = seen.filter((one) => one.op === 'chat.create').pop()
+  assert.equal(create.args.id, 'tv-1', 'chat.create 一定要帶酒館 id（少了它會拿角色當酒館）')
+  assert.equal(create.args.character, '酒保')
+  assert.equal(create.args.name, '酒保', '名稱要送出去')
+  let append = seen.filter((one) => one.op === 'chat.append').pop()
+  assert.ok(append !== undefined, '選了開場白就要把它寫進檔案')
+  assert.equal(append.args.character, '酒保', 'append 用的是 create 回傳的角色')
+  assert.equal(append.args.chat, '酒保', 'append 用的是 create 回傳的名字，不是自己送的那個')
+  assert.equal(append.args.messages[0].text, '他擦著杯子。', '寫進去的要是選的那一則')
+  assert.equal(append.args.messages[0].isUser, false, '開場白是角色的訊息，不是使用者的')
+
+  // 6b. 建立完要**直接跳進那份對話**（使用者：「創建好的時候順便幫我跳過去」）。
+  const errBox = collect(renderRooms(), (el) => el.props.className === 'dsh-tv-err')[0]
+  assert.deepEqual(
+    panels,
+    ['tavern-chats'],
+    '建立完要切到對話面板（不然只會回到列表，還要自己再找一次那一列）' +
+      '／錯誤框：' + (errBox === undefined ? '（沒有）' : flatten(errBox)),
+  )
+
+  // 7. 手改過的名稱不可以被下一次點卡蓋掉。
+  form = await openForm()
+  const custom = nameField(form)
+  custom.props.onChange({ target: { value: '第一次來' } })
+  form = renderRooms()
+  posterOf(form, '酒保').props.onClick()
+  form = renderRooms()
+  assert.equal(nameField(form).props.value, '第一次來', '使用者改過的名字不該被點卡蓋掉')
+
+  // 8.「不要開場白」→ 檔案是空的，不該有 append。
+  const before = seen.filter((one) => one.op === 'chat.append').length
+  byLabel(form, '不要開場白').props.onClick()
+  form = renderRooms()
+  byLabel(form, '建立對話').props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  create = seen.filter((one) => one.op === 'chat.create').pop()
+  assert.equal(create.args.name, '第一次來', '建立要用表單裡的名字')
+  assert.equal(
+    seen.filter((one) => one.op === 'chat.append').length,
+    before,
+    '選了「不要開場白」就不該寫入任何訊息',
+  )
+
+  exportsObject.__chat.setContext(null)
+  reactImpl.resetHooks()
+  exportsObject.__setZone('hall')
+  for (const key of ['taverns', 'activeId', 'characters', 'summary', 'settings']) {
+    delete exportsObject.__testSeed[key]
+  }
+  console.log('4k. 開新對話 OK — 選卡（有圖）、名稱跟著卡但不蓋手改、開場白寫進檔案、建完直接進去')
+}
+
 /* --------- 📖 藏書：條目編輯器（純函式，所以離線驗得到完整行為）--------- */
 
 {
@@ -2240,6 +2399,104 @@ function spyRpc(seen, extra) {
         /return React\.createElement\(RunningDot\)/.test(source),
       '側邊欄那一列要在「進行中」時改用 RunningDot',
     )
+  }
+
+  /* ---------- 對話頁的分頁（使用者：「進階設定就像大廳一樣，用分頁來完成」）---------- */
+
+  {
+    // ⚠️ 這一段**不需要**訊息載入：分頁列跟分頁內容都不依赖 `chat.loaded`，
+    // 所以它是訊息列那條路徑以外、唯一進得去的對話頁斷言。
+    exportsObject.__selectChat({ character: '老闆娘', name: '夜晚', file: '夜晚.jsonl' })
+    reactImpl.resetHooks()
+    const renderChat = () => renderComponent(TavernChatPage, {})
+
+    const tabs = collect(
+      renderChat(),
+      (el) => el.type === 'button' && String(el.props.className || '').indexOf('dsh-tv-zone') === 0,
+    )
+    assert.deepEqual(
+      tabs.map((one) => one.props.children),
+      ['💬 對話', '🖼️ 插圖', '📄 檔案'],
+      '對話頁要有三個分頁（跟四個分區同一組樣式）',
+    )
+    assert.match(tabs[0].props.className, /dsh-tv-zoneOn/, '預設要停在「對話」')
+
+    // 一次只畫一個分頁——這是「分頁」的定義，不是實作細節。
+    const onChat = flatten(renderChat())
+    assert.ok(onChat.includes('送出'), '對話分頁要有輸入與送出')
+    assert.equal(onChat.includes('加入插圖'), false, '對話分頁不該同時畫插圖管理器')
+
+    exportsObject.__setChatTab('art')
+    const onArt = flatten(renderChat())
+    assert.ok(onArt.includes('加入插圖'), '插圖分頁要有插圖管理器')
+    assert.equal(onArt.includes('送出'), false, '插圖分頁不該還有輸入框')
+
+    exportsObject.__setChatTab('file')
+    const onFile = flatten(renderChat())
+    assert.ok(onFile.includes('chats/老闆娘/夜晚.jsonl'), '檔案分頁要看得到對話檔的路徑')
+    assert.equal(onFile.includes('加入插圖'), false, '檔案分頁不該有插圖管理器')
+
+    exportsObject.__setChatTab('chat')
+    exportsObject.__selectChat(null)
+    reactImpl.resetHooks()
+    console.log('14c. 對話頁分頁 OK — 三個分頁、一次只畫一個、預設停在對話')
+  }
+
+  /* ---------- 匯出：瀏覽器半自己接 `ccv3` 區塊 ---------- */
+
+  {
+    // 宿主半的讀取端。放在這裡動態 import，才不用動檔案開頭的匯入區。
+    const hostPngcard = await import('./lib/pngcard.js')
+    const api = exportsObject.__exportCard
+    assert.equal(typeof api, 'object', '匯出用的純函式要匯出給測試')
+
+    // 1. V3 信封：規格裡寫死 MUST 的欄位要補齊。
+    const wrapped = api.v3Card({ name: '甲', first_mes: '嗨' })
+    assert.equal(wrapped.spec, 'chara_card_v3')
+    assert.equal(wrapped.spec_version, '3.0')
+    assert.deepEqual(wrapped.data.group_only_greetings, [], 'V3 的 group_only_greetings 不可以缺')
+    assert.equal(wrapped.data.assets[0].uri, 'ccdefault:', '沒有插圖時要用規格給的預設值')
+    assert.equal(wrapped.data.name, '甲', '原欄位要原樣帶過去')
+
+    // 2. **跨面契約**：客戶端的寫入端產生的位元組，交給宿主半的讀取端讀。
+    //    兩邊各自實作 base64／CRC／chunk 佈局，只有全部正確才會一致——
+    //    這一條比對字串有意義得多。
+    const SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+    const be32 = (n) => [(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff]
+    const chunkOf = (type, data) => [
+      ...be32(data.length),
+      ...[...type].map((one) => one.charCodeAt(0)),
+      ...data,
+      0, 0, 0, 0, // CRC：讀取端刻意不驗它（別人的卡不該因為一個 CRC 就讀不了）
+    ]
+    const tiny = new Uint8Array([
+      ...SIGNATURE,
+      ...chunkOf('IHDR', new Array(13).fill(0)),
+      ...chunkOf('IDAT', [1, 2, 3, 4]),
+      ...chunkOf('IEND', []),
+    ])
+    const png = api.spliceCardChunk(tiny, wrapped, 'ccv3')
+    assert.ok(png.length > tiny.length, '匯出應該比原圖大（多了卡片資料）')
+
+    const back = hostPngcard.readCardFromPng(Buffer.from(png))
+    assert.equal(back.keyword, 'ccv3', '區塊要能被宿主半的讀取端認出來（關鍵字與位置都對）')
+    assert.equal(back.card.spec, 'chara_card_v3')
+    assert.equal(back.card.data.name, '甲')
+    assert.equal(back.card.data.first_mes, '嗨')
+    // 像素資料不能被動到。
+    assert.ok(
+      Buffer.from(png).includes(Buffer.from(chunkOf('IDAT', [1, 2, 3, 4]))),
+      'IDAT 要原封不動（接區塊，不是重新編碼）',
+    )
+
+    // 3. 壞檔要講清楚，不要靜靜地產生一個壞 PNG。
+    assert.throws(
+      () => api.spliceCardChunk(new Uint8Array(SIGNATURE), wrapped, 'ccv3'),
+      /IEND/,
+      '找不到 IEND 要丟錯',
+    )
+
+    console.log('14d. 匯出 OK — V3 信封補齊必填欄位、ccv3 區塊寫得進去也讀得回來、IDAT 沒被動')
   }
 
   __chat.setContext(null)
