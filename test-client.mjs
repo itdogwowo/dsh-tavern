@@ -914,7 +914,20 @@ async function menuItemsFor(sidebar) {
 }
 
 const MENU_SIDEBAR = { taverns: [{ id: 't1', name: '酒館', path: '/x', active: true, icon: '' }], loaded: true, reload: () => {}, wide: true, opened: true, onToggle: () => {} }
-const A_CHAT = [{ character: '老闆娘', name: '夜晚', file: '夜晚.jsonl', assetId: '夜晚', size: 120, mtimeMs: 1, assets: null }]
+const A_CHAT = [
+  {
+    character: '老闆娘',
+    // `room` 是**身分**（資料夾名）；`name` 只是顯示名稱。客戶端送 op 時要用前者
+    // ——同名可以有兩間房，送名字會命中第一間。
+    room: 'm1k3x9-a7f2',
+    name: '夜晚',
+    file: 'm1k3x9-a7f2/chat.jsonl',
+    assetId: '夜晚',
+    size: 120,
+    mtimeMs: 1,
+    assets: null,
+  },
+]
 
 /** 裝一個假的宿主半；`extra` 可以覆寫特定 op。 */
 function spyRpc(seen, extra) {
@@ -957,8 +970,8 @@ function spyRpc(seen, extra) {
   assert.ok(call !== undefined, 'Enter 之後要送 chat.rename')
   assert.deepEqual(
     [call.args.id, call.args.character, call.args.chat, call.args.name],
-    ['t1', '老闆娘', '夜晚', '白天'],
-    'chat.rename 的參數：酒館 id／角色／**現在**的名字／新的名字',
+    ['t1', '老闆娘', 'm1k3x9-a7f2', '白天'],
+    'chat.rename 的參數：酒館 id／角色／**房間 id**（不是名字！）／新的名字',
   )
   exportsObject.__chat.setContext(null)
   console.log('13a. 改名 OK — 按鈕只開行內輸入，Enter 才送 chat.rename（四個參數都對）')
@@ -975,8 +988,8 @@ function spyRpc(seen, extra) {
   assert.ok(call !== undefined, '「刪除」要送 chat.delete')
   assert.deepEqual(
     [call.args.id, call.args.character, call.args.chat],
-    ['t1', '老闆娘', '夜晚'],
-    '刪除的三個參數都要對',
+    ['t1', '老闆娘', 'm1k3x9-a7f2'],
+    '刪除的三個參數都要對（第三個是**房間 id**，不是名字）',
   )
   console.log('13b. 刪除 OK — 選單上的刪除送 chat.delete（三個參數都對）')
 }
@@ -996,7 +1009,12 @@ function spyRpc(seen, extra) {
         : undefined,
   })
   spyRpc(seen, {
-    'chat.create': () => ({ character: '老闆娘', name: '夜晚-2', file: '夜晚-2.jsonl' }),
+    'chat.create': () => ({
+      character: '老闆娘',
+      room: 'm1k3x9-fork',
+      name: '夜晚-2',
+      file: 'm1k3x9-fork/chat.jsonl',
+    }),
     'chat.messages': () => [{ name: '你', isUser: true, text: '嗨' }],
   })
 
@@ -1010,7 +1028,7 @@ function spyRpc(seen, extra) {
   const bindCall = seen.filter((one) => one.op === 'session.bind').pop()
   assert.ok(bindCall !== undefined, '分支完要把新 session 綁到新檔')
   assert.equal(bindCall.args.sessionId, 'session-forked', '綁的是分支出來的新 session')
-  assert.equal(bindCall.args.chat, '夜晚-2', '綁的是新開的那份檔（不是原本的）')
+  assert.equal(bindCall.args.chat, 'm1k3x9-fork', '綁的是新開的那間房（房間 id，不是名字）')
   const appendCall = seen.filter((one) => one.op === 'chat.append').pop()
   assert.ok(appendCall !== undefined, '分支要把目前看到的訊息一起分出去')
   assert.equal(appendCall.args.messages.length, 1, '一則訊息就寫一則')
@@ -1282,7 +1300,12 @@ function spyRpc(seen, extra) {
     'character.list': () => exportsObject.__testSeed.characters,
     // 回音：`chat.create` 回傳的名字才是真正用的（撞名會換編號），
     // 所以讓 mock 照著 args 回，才驗得到「append 用的是回傳值」。
-    'chat.create': (args) => ({ character: args.character, name: args.name, file: args.name + '.jsonl' }),
+    'chat.create': (args) => ({
+      character: args.character,
+      room: 'r-' + args.name,
+      name: args.name,
+      file: 'r-' + args.name + '/chat.jsonl',
+    }),
   })
 
   // ⚠️ 重繪**不可以** `resetHooks()`。
@@ -1354,7 +1377,7 @@ function spyRpc(seen, extra) {
   let append = seen.filter((one) => one.op === 'chat.append').pop()
   assert.ok(append !== undefined, '選了開場白就要把它寫進檔案')
   assert.equal(append.args.character, '酒保', 'append 用的是 create 回傳的角色')
-  assert.equal(append.args.chat, '酒保', 'append 用的是 create 回傳的名字，不是自己送的那個')
+  assert.equal(append.args.chat, 'r-酒保', 'append 用的是 create 回傳的**房間 id**，不是名字')
   assert.equal(append.args.messages[0].text, '他擦著杯子。', '寫進去的要是選的那一則')
   assert.equal(append.args.messages[0].isUser, false, '開場白是角色的訊息，不是使用者的')
 
@@ -2045,10 +2068,13 @@ function spyRpc(seen, extra) {
   )
   // 側邊欄訂閱「只重畫、不重讀」那一條：對話開始／結束跑時要換圖示，
   // 但不必為了一顆圖示重讀六份 `.jsonl`。
+  // 第二個訂閱點是設定頁：側邊欄那顆 ＋ 直接改模組層級的 `currentZone`，
+  // 而重畫側邊欄不會重畫主面板——沒有這一條，那顆按鈕在「已經停在這一頁」時
+  // 看起來就像沒反應（使用者回報過）。
   assert.equal(
     (source.match(/useRefreshChannelRerender\(/g) || []).length,
-    2,
-    '側邊欄要用 useRefreshChannelRerender（宣告 ＋ 酒館街那一處）',
+    3,
+    '側邊欄要用 useRefreshChannelRerender（宣告 ＋ 酒館街 ＋ 設定頁）',
   )
   assert.ok(
     /function useRefreshChannelRerender\(/.test(source) && /refreshChannel\.watch\(/.test(source),
@@ -2411,7 +2437,12 @@ function spyRpc(seen, extra) {
   {
     // ⚠️ 這一段**不需要**訊息載入：分頁列跟分頁內容都不依赖 `chat.loaded`，
     // 所以它是訊息列那條路徑以外、唯一進得去的對話頁斷言。
-    exportsObject.__selectChat({ character: '老闆娘', name: '夜晚', file: '夜晚.jsonl' })
+    exportsObject.__selectChat({
+      character: '老闆娘',
+      room: 'm1k3x9-a7f2',
+      name: '夜晚',
+      file: 'm1k3x9-a7f2/chat.jsonl',
+    })
     reactImpl.resetHooks()
     const renderChat = () => renderComponent(TavernChatPage, {})
 
@@ -2421,8 +2452,8 @@ function spyRpc(seen, extra) {
     )
     assert.deepEqual(
       tabs.map((one) => one.props.children),
-      ['💬 對話', '🖼️ 插圖', '📄 檔案'],
-      '對話頁要有三個分頁（跟四個分區同一組樣式）',
+      ['💬 對話', '🖼️ 插圖', '⚙️ 房間', '📄 檔案'],
+      '對話頁要有四個分頁（跟分區列同一組樣式）',
     )
     assert.match(tabs[0].props.className, /dsh-tv-zoneOn/, '預設要停在「對話」')
 
@@ -2438,7 +2469,12 @@ function spyRpc(seen, extra) {
 
     exportsObject.__setChatTab('file')
     const onFile = flatten(renderChat())
-    assert.ok(onFile.includes('chats/老闆娘/夜晚.jsonl'), '檔案分頁要看得到對話檔的路徑')
+    assert.ok(
+      onFile.includes('chats/老闆娘/m1k3x9-a7f2'),
+      '檔案分頁要看得到房間資料夾（用 id，不是名字）：' + onFile.slice(0, 120),
+    )
+    assert.ok(onFile.includes('room.json'), '而且要指出設定檔在哪（那是使用者要改的東西）')
+    assert.ok(onFile.includes('複製路徑'), '要給「複製路徑」——使用者要的是能直接貼進檔案總管')
     assert.equal(onFile.includes('加入插圖'), false, '檔案分頁不該有插圖管理器')
 
     exportsObject.__setChatTab('chat')
@@ -2502,6 +2538,93 @@ function spyRpc(seen, extra) {
     )
 
     console.log('14d. 匯出 OK — V3 信封補齊必填欄位、ccv3 區塊寫得進去也讀得回來、IDAT 沒被動')
+  }
+
+  /* ---------- 訊息列：頭像 ＋ 氣泡 ＋ 名稱在氣泡外 ---------- */
+  //
+  // 這一塊一直到現在才測得到：對話頁的載入住在 `useEffect`，而離線的假 React
+  // 不跑 effect。元件現在會把載入函式留在模組層級，所以測試叫 `__loadChat()`。
+
+  {
+    const card = {
+      id: '老闆娘',
+      file: '老闆娘.json',
+      card: { name: '老闆娘' },
+      assets: {
+        items: [{ name: 'a.png', url: '/api/dsh-tavern/assets/characters/老闆娘/a.png' }],
+        primary: 'a.png',
+        owner: '老闆娘',
+      },
+    }
+    spyRpc([], {
+      'character.list': () => [card],
+      // `unused` 是宿主半沒收到名字時寫進 `.jsonl` 的佔位字串（SillyTavern 也這樣寫）。
+      'chat.messages': () => [
+        { name: 'unused', isUser: true, text: '嗨' },
+        { name: '老闆娘', isUser: false, text: '你終於來了。' },
+      ],
+    })
+    Object.assign(exportsObject.__testSeed, {
+      loaded: true,
+      taverns: [{ id: 'tv-1', name: '測試酒館', active: true, exists: true, scaffolded: true }],
+      activeId: 'tv-1',
+      characters: [card],
+      summary: { name: 'tavern', counts: {}, files: [], layout: [] },
+      settings: { name: '測試酒館', note: '' },
+    })
+
+    exportsObject.__selectChat({
+      character: '老闆娘',
+      room: 'm1k3x9-a7f2',
+      name: '夜晚',
+      file: 'm1k3x9-a7f2/chat.jsonl',
+    })
+    reactImpl.resetHooks()
+    renderComponent(TavernChatPage, {})
+    await exportsObject.__loadChat()
+    // ⚠️ 重繪**不可以** resetHooks：狀態住在 `useRef` 裡（同 4k 的坑）。
+    const tree = renderComponent(TavernChatPage, {})
+
+    const rows = collect(
+      tree,
+      (el) =>
+        el.props !== undefined &&
+        (el.props.className === 'dsh-tv-msg' || el.props.className === 'dsh-tv-msg dsh-tv-msgMe'),
+    )
+    assert.equal(rows.length, 2, '兩則訊息＝兩列（頭像 ＋ 氣泡）')
+    assert.match(String(rows[0].props.className), /dsh-tv-msgMe/, '你的訊息在右邊')
+    assert.equal(String(rows[1].props.className).includes('dsh-tv-msgMe'), false, '角色的訊息在左邊')
+
+    // 名稱在氣泡**外面**（使用者：「名稱不在對話框內」）。
+    const rowBody = collect(rows[1], (el) => el.props.className === 'dsh-tv-msgBody')[0]
+    const bubble = collect(rows[1], (el) => el.props.className === 'dsh-tv-bubble')[0]
+    assert.ok(rowBody !== undefined && bubble !== undefined, '一列＝頭像 ＋ msgBody（裡面才是氣泡）')
+    assert.equal(
+      collect(bubble, (el) => el.props.className === 'dsh-tv-bubbleWho').length,
+      0,
+      '名稱不可以在氣泡裡面',
+    )
+    assert.equal(
+      collect(rowBody, (el) => el.props.className === 'dsh-tv-bubbleWho').length,
+      1,
+      '名稱要在氣泡外面的那一層',
+    )
+
+    // 頭像：角色用卡片主圖（而且走修好的雙斜線形狀），你用名字的第一個字。
+    const art = collect(rows[1], (el) => el.props.className === 'dsh-tv-avatar')[0]
+    assert.ok(art !== undefined, '角色的訊息要有頭像')
+    assert.equal(art.props.src, '/api/dsh-tavern/assets//characters/老闆娘/a.png', '頭像＝卡片主圖')
+    const mine = collect(rows[0], (el) => el.props.className === 'dsh-tv-avatar dsh-tv-avatarText')[0]
+    assert.ok(mine !== undefined, '你的訊息也要有頭像')
+    assert.equal(mine.props.children, '你', '`unused` 要顯示成「你」')
+    assert.equal(flatten(rows[0]).includes('unused'), false, '畫面上不該出現 `unused`')
+
+    exportsObject.__selectChat(null)
+    reactImpl.resetHooks()
+    for (const key of ['taverns', 'activeId', 'characters', 'summary', 'settings']) {
+      delete exportsObject.__testSeed[key]
+    }
+    console.log('14e. 訊息列 OK — 頭像（卡片主圖／字母）、名稱在氣泡外、unused 不露出來')
   }
 
   __chat.setContext(null)
@@ -2967,6 +3090,156 @@ function spyRpc(seen, extra) {
     delete exportsObject.__testSeed[key]
   }
   console.log('11. 刪除對話 OK — 二段確認、chat.delete 的三個參數、沒有對話框')
+}
+
+/* --------- 房間裡也能改名（使用者：「改名應該房間內都可以改，不一定要在出面」）--------- */
+
+{
+  /**
+   * 症狀：改名以前只住在側邊欄那一列的 ⋯ 選單裡。人已經在房間裡了（對話頁的
+   * 「⚙️ 房間」分頁有指示、有工具權限），卻要退出去才改得動名字。
+   *
+   * 這一條同時釘住一件**很容易寫錯的事**：`room.rename` 只回
+   * `{character, room, name}`，所以座標要**合併**不能取代——直接換掉會讓這一頁
+   * 手上的 `roomPrompt`／`allowTools`／`file` 當場消失（改名不是重讀）。
+   */
+  const { __setRpc, __selectChat, __setChatTab, __currentChat } = exportsObject
+  const { TavernChatPage: ChatPage } = exportsObject.__components
+
+  const seen = []
+  __setRpc((op, args) => {
+    seen.push({ op, args })
+    // 照宿主半 `renameRoom` 的回傳值回（就是那三個欄位）。
+    if (op === 'room.rename') {
+      return Promise.resolve({ character: args.character, room: args.room, name: args.name })
+    }
+    return Promise.resolve({})
+  })
+
+  const room = {
+    character: '老闆娘',
+    room: 'm1k3x9-a7f2',
+    name: '夜晚',
+    file: 'm1k3x9-a7f2/chat.jsonl',
+    roomPrompt: '外面在下雨',
+    allowTools: 'read',
+  }
+  const nameField = (tree) =>
+    collect(tree, (el) => el.type === 'input' && el.props['aria-label'] === '這間房的名字')[0]
+  const saveBtn = (tree) =>
+    collect(tree, (el) => el.type === 'button' && flatten(el).includes('儲存名字'))[0]
+  const renderRoomTab = () => {
+    __setChatTab('room')
+    return renderComponent(ChatPage, {})
+  }
+
+  __selectChat(room)
+  reactImpl.resetHooks()
+  // ⚠️ 重繪**不可以** `resetHooks()`（理由同 4k）：這一頁的狀態住在 `useRef` 裡。
+  let pane = renderRoomTab()
+  assert.ok(nameField(pane) !== undefined, '「⚙️ 房間」分頁要有改名欄位')
+  assert.equal(nameField(pane).props.value, '夜晚', '欄位要先顯示現在的名字')
+  assert.ok(flatten(pane).includes('這間房的名字'), '要有標籤，不然沒人知道那格是什麼')
+
+  // 打字 → 「儲存名字」。空白要去掉（使用者很容易多打一個空格）。
+  nameField(pane).props.onChange({ target: { value: '  雨夜  ' } })
+  saveBtn(pane).props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+
+  const calls = seen.filter((one) => one.op === 'room.rename')
+  assert.equal(calls.length, 1, '按一下送一次 room.rename')
+  assert.deepEqual(
+    calls[0].args,
+    { character: '老闆娘', room: 'm1k3x9-a7f2', name: '雨夜' },
+    '要用**房間 id**送（名字不是身分），而且要去掉前後空白',
+  )
+
+  const now = __currentChat()
+  assert.equal(now.name, '雨夜', '改完手上的座標要換成新名字')
+  assert.equal(now.room, 'm1k3x9-a7f2', '身分（房間 id）不變')
+  assert.equal(now.file, 'm1k3x9-a7f2/chat.jsonl', '對話檔的路徑不變——改名不動資料夾')
+  assert.equal(now.roomPrompt, '外面在下雨', '改名不可以弄丟「這一場的指示」')
+  assert.equal(now.allowTools, 'read', '改名不可以弄丟這一間房的工具權限')
+
+  // 改名之後**這一頁不能被自己清掉**：名字換了，但房間沒換，訊息與通知都該留著。
+  // 這一條抓的是「用名字當身分」的寫法——那樣會在改完的下一輪把整頁重置
+  // （`chat.notice` 一起被清掉）。
+  pane = renderRoomTab()
+  assert.ok(flatten(pane).includes('已改名為'), '改完要顯示結果，而且這一頁不能被自己的改名重置')
+  assert.equal(nameField(pane).props.value, '雨夜', '欄位要跟著新名字走')
+
+  // 沒改（或改成空的）就不該送 op——不然會把名字清成空字串。
+  nameField(pane).props.onChange({ target: { value: '   ' } })
+  saveBtn(pane).props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(seen.filter((one) => one.op === 'room.rename').length, 1, '空名字不送 op')
+
+  __setChatTab('chat')
+  __selectChat(null)
+  reactImpl.resetHooks()
+  console.log('14f. 房間內改名 OK — 用房間 id 送、只換名字（其他欄位不被清掉）、這一頁不會被重置')
+}
+
+/* ------------------- ＋ 是來回鍵（使用者：「重新點擊 ＋ 不會跳回去」）------------------- */
+
+{
+  /**
+   * ＋ 原本是單程票：按下去跳到那間酒館的「💬 包廂」，但人已經在包廂裡的時候
+   * 再按一次**什麼都不會發生**——使用者要的是「再按一次就沿原路回去」。
+   *
+   * 判斷「我是不是已經在包廂裡」需要兩件事：分區（模組層級的 `currentZone`）與
+   * 主面板（`layout.selectPanel` 只有 setter，所以自己記一份 `shownPanel`）。
+   */
+  const { __setZone, __currentZone, __shownPanel, __selectChat } = exportsObject
+  const panels = []
+  exportsObject.__chat.setContext({
+    get: (key) => (key === 'layout' ? { selectPanel: (name) => panels.push(name) } : undefined),
+  })
+
+  const room = { character: '老闆娘', room: 'm1k3x9-a7f2', name: '雨夜', file: 'm1k3x9-a7f2/chat.jsonl' }
+  __selectChat(room)
+  __setZone('hall')
+  reactImpl.resetHooks()
+
+  const plus = collect(renderStreet(), (el) => el.type === 'button' && el.props.title === '新對話')[0]
+  assert.ok(plus !== undefined, '側邊欄那一顆「新對話」還在（＋ 沒有被拿掉）')
+
+  // 第一次：在別的地方按 → 去包廂（原本的行為，不能改壞）。
+  plus.props.onClick({ stopPropagation() {} })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(__currentZone(), 'rooms', '按 ＋ 要切到「💬 包廂」那一區')
+  assert.deepEqual(panels, ['tavern'], '而且要把主面板真的指過去')
+  assert.equal(__shownPanel(), 'tavern', '要記住「現在停在這一頁」才可能回頭')
+
+  // 第二次：已經在包廂裡了 → 這一下是「回去」。
+  plus.props.onClick({ stopPropagation() {} })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual(panels, ['tavern', 'tavern-chats'], '第二次按 ＋ 要回到剛剛在看的那份對話')
+
+  // 沒有對話可以回的時候不可以亂跳（留在包廂，不要把人送去空頁）。
+  panels.length = 0
+  __selectChat(null)
+  plus.props.onClick({ stopPropagation() {} })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual(panels, ['tavern'], '沒有對話可回時仍然是「去包廂」')
+
+  // 分區是模組層級狀態：側邊欄改它之後，主面板那一頁必須收到通知才會重畫。
+  // 沒有這一條，那顆 ＋ 在「已經停在這一頁」時看起來就像壞了（按了沒反應）。
+  assert.match(
+    source,
+    /currentZone = 'rooms'\n\s*\/\/[^\n]*\n(\s*\/\/[^\n]*\n)*\s*refreshChannel\.bump\(\)/,
+    '切分區之後要通知主面板重畫（側邊欄的重畫不會重畫它）',
+  )
+  assert.match(
+    source,
+    /function TavernSettingsPage\(\)[\s\S]{0,900}?useRefreshChannelRerender\(renderPage\)/,
+    '設定頁要訂閱那個通知（只重畫、不重讀）',
+  )
+
+  exportsObject.__chat.setContext(null)
+  reactImpl.resetHooks()
+  __setZone('hall')
+  console.log('14g. ＋ 是來回鍵 OK — 第一次去包廂、第二次回對話、沒對話可回時不亂跳')
 }
 
 /* ------------------------------ 逐個元件試渲染 ------------------------------ */

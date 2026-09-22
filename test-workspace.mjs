@@ -173,23 +173,68 @@ try {
     console.log('4. 世界書 OK — 原樣讀寫與刪除')
   }
 
-  /* --- 5. 對話紀錄 ------------------------------------------------------ */
+  /* --- 5. 房間（一間房＝一個資料夾）-------------------------------------- */
   {
-    const created = await ws.createChat('測試劍士', '初次見面')
-    assert.equal(created.file, '初次見面.jsonl')
-    const listed = await ws.listChats()
-    assert.equal(listed.length, 1)
-    assert.equal(listed[0].character, '測試劍士')
-    const raw = (await readFile(join(root, 'chats', '測試劍士', '初次見面.jsonl'), 'utf8')).trim()
-    const header = JSON.parse(raw)
+    // 用 `readFile`／`readdir` 當存在性檢查，不必新增匯入。
+    const existsFile = (path) => readFile(path).then(() => true, () => false)
+    const existsDir = (path) => readdir(path).then(() => true, () => false)
+
+    const created = await ws.createRoom('測試劍士', '初次見面')
+    assert.equal(created.name, '初次見面', '顯示名稱是使用者給的那個')
+    assert.match(created.room, /^[0-9a-z]+-[0-9a-z]{4}$/, 'id 是「時間 base36-隨機 4 碼」：' + created.room)
+
+    // 佈局：設定、對話、插圖三個東西都在**同一個資料夾**裡。
+    const dir = join(root, 'chats', '測試劍士', created.room)
+    assert.equal(await existsFile(join(dir, 'room.json')), true, 'room.json 要在房間資料夾裡')
+    assert.equal(await existsFile(join(dir, 'chat.jsonl')), true, 'chat.jsonl 要在房間資料夾裡')
+    assert.equal(await existsDir(join(dir, 'art')), true, 'art/ 要在房間資料夾裡')
+    const header = JSON.parse((await readFile(join(dir, 'chat.jsonl'), 'utf8')).trim().split('\n')[0])
     assert.equal(typeof header.chat_metadata, 'object', '第一行要是 SillyTavern 聊天標頭')
     assert.equal(header.user_name, 'unused')
 
-    const again = await ws.createChat('測試劍士', '初次見面')
-    assert.equal(again.file, '初次見面-2.jsonl', '撞名要自動編號，不覆蓋')
-    const anonymous = await ws.createChat('測試劍士')
-    assert.ok(anonymous.file.endsWith('.jsonl'), '沒給名字時用時間戳')
-    console.log('5. 對話 OK — SillyTavern 標頭、撞名編號、時間戳')
+    // **同名不是衝突**：再開一間同名 → 不同的 id（身分不是名字）。
+    // 舊的 `createChat` 會編成 `初次見面-2`，因為它拿名字當檔名——那正是這裡解掉的問題。
+    const again = await ws.createRoom('測試劍士', '初次見面')
+    assert.notEqual(again.room, created.room, '同名要拿到不同的房間 id')
+    assert.equal(again.name, '初次見面', '同名的顯示名稱就該一樣')
+
+    // 改名**只改 room.json 裡的名字，資料夾與檔案全部不動**。
+    await ws.renameRoom('測試劍士', created.room, '雨夜')
+    assert.equal((await ws.readRoom('測試劍士', created.room)).name, '雨夜', '改名寫進 room.json')
+    assert.equal(await existsFile(join(dir, 'chat.jsonl')), true, '改完名資料夾與對話檔還在原地')
+
+    // 訊息：寫進去、讀得回來（含思考）。
+    await ws.appendRoomMessages('測試劍士', created.room, [
+      { name: 'unused', isUser: true, text: '嗨' },
+      { name: '測試劍士', isUser: false, text: '你來了。', reasoning: '他終於來了' },
+    ])
+    const messages = await ws.readRoomMessages('測試劍士', created.room)
+    assert.equal(messages.length, 2)
+    assert.equal(messages[0].isUser, true)
+    assert.equal(messages[1].text, '你來了。')
+    assert.equal(messages[1].reasoning, '他終於來了', '思考要跟著訊息一起保存')
+
+    // 每房自己的設定（從酒館下放的那幾個）。
+    const patched = await ws.writeRoom('測試劍士', created.room, {
+      roomPrompt: '這一場下著雨',
+      allowTools: 'read',
+    })
+    assert.equal(patched.roomPrompt, '這一場下著雨')
+    assert.equal(patched.allowTools, 'read')
+    assert.equal((await ws.readRoom('測試劍士', created.room)).roomPrompt, '這一場下著雨', '設定讀得回來')
+    // 不明的值一律 fail closed（回到「聽酒館的」）。
+    const junk = await ws.writeRoom('測試劍士', created.room, { allowTools: 'ALL' })
+    assert.equal(junk.allowTools, 'inherit', '不認識的工具等級要回到 inherit')
+
+    // **只認 id**：顯示名稱不是身分——同名可以有兩間房，依名字解析會命中第一間
+    // （那正是 2.6.6 三個 bug 的來源）。id 解析得到，名字**不再**解析得到。
+    assert.equal(await ws.resolveRoom('測試劍士', created.room), created.room, 'id 解析得到')
+    await assert.rejects(
+      () => ws.resolveRoom('測試劍士', '雨夜'),
+      /找不到這間房/,
+      '顯示名稱不再解析得到（它只是顯示用的）',
+    )
+    console.log('5. 房間 OK — 資料夾佈局、同名不衝突、改名不動路徑、設定與訊息')
   }
 
   /* --- 6. 路徑防護與文字轉換 -------------------------------------------- */
@@ -222,7 +267,7 @@ try {
     assert.equal(summary.exists, true)
     assert.equal(summary.counts.characters, 2, '前面留下兩張卡')
     assert.equal(summary.counts.worldbooks, 0)
-    assert.equal(summary.counts.chats, 3, '初次見面、初次見面-2、時間戳那一份')
+    assert.equal(summary.counts.chats, 2, '上面開了兩間同名的房')
     assert.equal(summary.name, root.split(/[\\/]/).pop())
 
     assert.equal(resolveDshHome({ DSH_HOME: 'C:\\tmp\\dsh' }).includes('dsh'), true)
@@ -509,8 +554,8 @@ try {
   {
     const ws = new TavernWorkspace(join(root, 'sessions-shop'))
     await ws.ensure()
-    await ws.createChat('老闆娘', '夜晚')
-    await ws.createChat('酒保', '打烊後')
+    await ws.createRoom('老闆娘', '夜晚')
+    await ws.createRoom('酒保', '打烊後')
 
     const SID = 'session-8e6ef1b9-b52f-47f3-8f60-c92f1f575e74'
 
@@ -547,14 +592,19 @@ try {
     assert.equal(await ws.readSession('../tavern'), null, '讀取也要擋（回 null 而不是丟錯）')
 
     // 對話檔的標頭：真相寫在這裡，索引掉了可以重建。
-    const stamped = await ws.stampChatSessionId('老闆娘', '夜晚', SID)
+    // 現在要先有**一間房**，標頭是蓋在 `<房間>/chat.jsonl` 上。
+    const stampedRoom = await ws.createRoom('老闆娘', '夜晚')
+    const stamped = await ws.stampChatSessionId('老闆娘', stampedRoom.room, SID)
     assert.equal(stamped, true, '第一次要真的改到東西')
-    assert.equal(await ws.stampChatSessionId('老闆娘', '夜晚', SID), false, '已經一樣就不重寫')
-    assert.equal(await ws.readChatSessionId('老闆娘', '夜晚'), SID, '讀得回來')
-    assert.equal(await ws.readChatSessionId('老闆娘', '不存在'), null, '不存在的對話回 null')
+    assert.equal(await ws.stampChatSessionId('老闆娘', stampedRoom.room, SID), false, '已經一樣就不重寫')
+    assert.equal(await ws.readChatSessionId('老闆娘', stampedRoom.room), SID, '讀得回來')
+    assert.equal(await ws.readChatSessionId('老闆娘', '不存在'), null, '不存在的房間回 null')
 
     // 標頭改到了，但訊息一則都不能少。
-    const raw = await readFile(join(root, 'sessions-shop', 'chats', '老闆娘', '夜晚.jsonl'), 'utf8')
+    const raw = await readFile(
+      join(root, 'sessions-shop', 'chats', '老闆娘', stampedRoom.room, 'chat.jsonl'),
+      'utf8',
+    )
     const lines = raw.split('\n').filter((line) => line !== '')
     assert.equal(lines.length, 1, '只有標頭行')
     assert.equal(JSON.parse(lines[0]).chat_metadata.dsh_session_id, SID)
@@ -570,7 +620,9 @@ try {
     assert.equal(recovered?.chat, '夜晚')
 
     // 不覆蓋：重建不該動到對話檔本身。
-    assert.equal(await ws.readChatSessionId('老闆娘', '夜晚'), SID)
+    // ⚠️ 一定要用 `stampedRoom.room`（上面蓋過標頭的那一間），不能用名字——
+    // 這段測試裡有**兩間**都叫「夜晚」的房，而 `resolveRoom` 依名字會命中第一間。
+    assert.equal(await ws.readChatSessionId('老闆娘', stampedRoom.room), SID)
 
     // 壞掉的索引檔 → 當作沒綁定，不要讓 Agent 面炸掉。
     await writeFile(join(root, 'sessions-shop', '.sessions', 'broken.json'), '{ 不是 JSON')
@@ -589,63 +641,70 @@ try {
   {
     const ws = new TavernWorkspace(join(root, 'delete-shop'))
     await ws.ensure()
-    await ws.createChat('老闆娘', '要刪的')
-    await ws.createChat('老闆娘', '要留的')
+    await ws.createRoom('老闆娘', '要留的')
+    const dropRoom = await ws.createRoom('老闆娘', '要刪的')
 
     const SID = 'session-delete-0000-1111-2222-333344445555'
-    await ws.bindSession(SID, { character: '老闆娘', chat: '要刪的' })
-    await ws.stampChatSessionId('老闆娘', '要刪的', SID)
+    await ws.bindSession(SID, { character: '老闆娘', room: dropRoom.room, chat: '要刪的' })
+    await ws.stampChatSessionId('老闆娘', dropRoom.room, SID)
 
-    // 這份對話自己的插圖
-    const artDir = join(root, 'delete-shop', 'art', 'chats', '老闆娘', '要刪的')
+    // 這間房自己的插圖——**在房間資料夾裡**，不再是 `art/chats/…`。
+    const artDir = join(root, 'delete-shop', 'chats', '老闆娘', dropRoom.room, 'art')
     await mkdir(artDir, { recursive: true })
     await writeFile(join(artDir, '場景.png'), 'not really a png')
 
-    const before = (await ws.listChats()).map((item) => item.name).sort()
-    assert.deepEqual(before, ['要刪的', '要留的'], '兩份都在')
+    const before = (await ws.listAllRooms()).map((item) => item.name).sort()
+    assert.deepEqual(before, ['要刪的', '要留的'], '兩間都在')
 
-    const removed = await ws.deleteChat('老闆娘', '要刪的')
-    assert.equal(removed.chat, '要刪的')
-    assert.deepEqual(removed.unbound, [SID], '要順手解掉綁在這份對話上的 session')
+    const removed = await ws.deleteRoom('老闆娘', dropRoom.room)
+    assert.equal(removed.room, dropRoom.room)
+    assert.deepEqual(removed.unbound, [SID], '要順手解掉綁在這間房上的 session')
 
-    const after = (await ws.listChats()).map((item) => item.name)
-    assert.deepEqual(after, ['要留的'], '只刪掉指定的那一份')
+    const after = (await ws.listAllRooms()).map((item) => item.name)
+    assert.deepEqual(after, ['要留的'], '只刪掉指定的那一間')
 
-    // 對照表是「關於這份對話」的中繼資料 → 一起清掉（不然之後同名對話會繼承舊綁定）
-    assert.equal(await ws.readSession(SID), null, '對話沒了，綁定也不該留著')
+    // 對照表是「關於這間房」的中繼資料 → 一起清掉（不然之後同名房間會繼承舊綁定）
+    assert.equal(await ws.readSession(SID), null, '房間沒了，綁定也不該留著')
 
-    // 但**不做連帶清理**：插圖留著（跟刪角色／刪世界書同一個規矩）
+    // ⚠️ **房間的資源跟著房間走**：刪房就是整個資料夾刪掉，房裡的插圖一起走。
+    // 這與舊的 `deleteChat` **相反**——那一條只刪 `.jsonl`，插圖留在 `art/chats/`
+    // 變成孤兒圖。房間的模型是「我把這間房拆了」，所以刪除就是刪除整個房間。
+    assert.equal(existsSync(join(artDir, '場景.png')), false, '房間拆了，房裡的插圖也不該留著')
     assert.equal(
-      existsSync(join(artDir, '場景.png')),
-      true,
-      '刪對話不刪插圖——這是「刪除只刪那個東西本身」的既有規矩',
+      existsSync(join(root, 'delete-shop', 'chats', '老闆娘', dropRoom.room)),
+      false,
+      '整個房間資料夾都不見了',
     )
 
     // 刪不存在的 → 明確報錯（不然「刪掉了」跟「本來就沒有」在畫面上長得一樣）
-    await assert.rejects(() => ws.deleteChat('老闆娘', '不存在'), /找不到這份對話/, '不存在的對話要明確報錯')
-    await assert.rejects(() => ws.deleteChat('老闆娘', ''), /對話名稱/, '空名稱要拒絕')
-    await assert.rejects(() => ws.deleteChat('../escape', 'x'), /角色 id/, '路徑跳脫要擋下')
+    await assert.rejects(
+      () => ws.deleteRoom('老闆娘', '不存在'),
+      /找不到這間房/,
+      '不存在的房間要明確報錯',
+    )
+    await assert.rejects(() => ws.deleteRoom('老闆娘', ''), /房間/, '空 id 要拒絕')
+    await assert.rejects(() => ws.deleteRoom('../escape', 'x'), /角色 id/, '路徑跳脫要擋下')
 
-    console.log('14. 刪除對話 OK — 只刪那一份、解掉綁定、不連帶刪插圖、不存在時明確報錯')
+    console.log('14. 刪除房間 OK — 整間拆掉（含插圖）、解掉綁定、不存在時明確報錯')
   }
 
-  /* --------------------- 15. 對話訊息的追加與讀取 ------------------------- */
+  /* --------------------- 15. 房間訊息的追加與讀取 ------------------------- */
 
   {
     const ws = new TavernWorkspace(join(root, 'messages-shop'))
     await ws.ensure()
-    await ws.createChat('老闆娘', '夜晚')
-    const file = join(root, 'messages-shop', 'chats', '老闆娘', '夜晚.jsonl')
+    const room = (await ws.createRoom('老闆娘', '夜晚')).room
+    const file = join(root, 'messages-shop', 'chats', '老闆娘', room, 'chat.jsonl')
 
-    assert.deepEqual(await ws.readChatMessages('老闆娘', '夜晚'), [], '剛開好的對話沒有訊息')
+    assert.deepEqual(await ws.readRoomMessages('老闆娘', room), [], '剛開好的房間沒有訊息')
 
-    const written = await ws.appendChatMessages('老闆娘', '夜晚', [
+    const written = await ws.appendRoomMessages('老闆娘', room, [
       { name: '阿明', isUser: true, text: '今天有什麼酒？' },
       { name: '老闆娘', isUser: false, text: '自己看板子。' },
     ])
     assert.equal(written, 2, '兩則都要寫進去')
 
-    const messages = await ws.readChatMessages('老闆娘', '夜晚')
+    const messages = await ws.readRoomMessages('老闆娘', room)
     assert.equal(messages.length, 2)
     assert.equal(messages[0].text, '今天有什麼酒？')
     assert.equal(messages[0].isUser, true)
@@ -655,8 +714,8 @@ try {
     assert.equal(typeof messages[0].sendDate, 'string', '要有時間戳')
 
     // ⚠️ 追加，不是改寫：既有的訊息一則都不能少
-    await ws.appendChatMessages('老闆娘', '夜晚', [{ name: '阿明', isUser: true, text: '再一杯。' }])
-    assert.equal((await ws.readChatMessages('老闆娘', '夜晚')).length, 3, '追加不能蓋掉前面的')
+    await ws.appendRoomMessages('老闆娘', room, [{ name: '阿明', isUser: true, text: '再一杯。' }])
+    assert.equal((await ws.readRoomMessages('老闆娘', room)).length, 3, '追加不能蓋掉前面的')
 
     // 標頭行要還在，而且沒有被當成訊息
     const raw = await readFile(file, 'utf8')
@@ -666,98 +725,96 @@ try {
     assert.equal(JSON.parse(lines[1]).mes, '今天有什麼酒？')
 
     // 空訊息、壞輸入 → 不寫，也不要丟錯
-    assert.equal(await ws.appendChatMessages('老闆娘', '夜晚', [{ name: 'x', text: '' }]), 0, '空字串不寫')
-    assert.equal(await ws.appendChatMessages('老闆娘', '夜晚', []), 0, '空陣列不寫')
-    assert.equal(await ws.appendChatMessages('老闆娘', '夜晚', null), 0, '不是陣列也不丟錯')
-    assert.equal((await ws.readChatMessages('老闆娘', '夜晚')).length, 3, '上面三次都沒寫進東西')
+    assert.equal(await ws.appendRoomMessages('老闆娘', room, [{ name: 'x', text: '' }]), 0, '空字串不寫')
+    assert.equal(await ws.appendRoomMessages('老闆娘', room, []), 0, '空陣列不寫')
+    assert.equal(await ws.appendRoomMessages('老闆娘', room, null), 0, '不是陣列也不丟錯')
+    assert.equal((await ws.readRoomMessages('老闆娘', room)).length, 3, '上面三次都沒寫進東西')
 
-    // 對話不存在 → 明確報錯（不准憑空生一份沒有標頭的檔案）
+    // 房間不存在 → 明確報錯（不准憑空生一份沒有標頭的檔案）
+    //
+    // ⚠️ 訊息從「找不到這份對話」變成「找不到這間房」：東西現在是房間，
+    // 而契約是「明確失敗、訊息可行動」，不是那幾個字。
     await assert.rejects(
-      () => ws.appendChatMessages('老闆娘', '不存在', [{ name: 'x', text: 'y' }]),
-      /找不到這份對話/,
-      '對不存在的對話追加要報錯',
+      () => ws.appendRoomMessages('老闆娘', '不存在', [{ name: 'x', text: 'y' }]),
+      /找不到這間房/,
+      '對不存在的房間追加要報錯',
     )
 
-    // 壞掉的一行 → 跳過那一行，其他照讀（不要讓一行壞資料毀掉整份對話）
+    // 壞掉的一行 → 跳過那一行，其他照讀（不要讓一行壞資料毀掉整間房）
     await writeFile(file, raw + '{ 這不是 JSON\n' + JSON.stringify({ name: 'x', is_user: true, mes: '好的' }) + '\n')
-    const survived = await ws.readChatMessages('老闆娘', '夜晚')
+    const survived = await ws.readRoomMessages('老闆娘', room)
     assert.equal(survived.length, 4, '壞行跳過，好的那則還是要讀到')
     assert.equal(survived[3].text, '好的')
 
-    console.log('15. 對話訊息 OK — 追加不覆蓋、空輸入不寫、壞行跳過、不存在時報錯')
+    console.log('15. 房間訊息 OK — 追加不覆蓋、空輸入不寫、壞行跳過、不存在時報錯')
   }
 
   /* ------------------------------- 16. 對話改名 ------------------------------- */
 
   {
-    // 一份對話的**身分**是「哪個角色的哪一份對話」，四處都記著同一個名字：
-    // 檔名、`.sessions` 對照表、插圖資料夾、`tavern.json` 的主圖 key。
-    // 所以改名一定要四處一起搬，否則會留下半套狀態（插圖變孤兒、綁定指向空氣）。
+    // 房間的**身分是 id**，所以改名**只改 `room.json` 裡的名字**——資料夾、對話檔、
+    // `.sessions` 對照表、插圖全部不用動。
+    //
+    // 舊的 `renameChat` 要同時搬四處（檔名、對照表、插圖資料夾、`tavern.json` 的主圖
+    // key），因為它拿**名字**當身分。那正是這個佈局要解掉的東西——所以這一段的斷言
+    // 從「四處都搬對了」變成「**四處都沒動**」。
     const ws = new TavernWorkspace(join(root, 'rename-shop'))
-    await ws.createChat('老闆娘', '夜晚')
-    await ws.appendChatMessages('老闆娘', '夜晚', [
+    const room = (await ws.createRoom('老闆娘', '夜晚')).room
+    await ws.appendRoomMessages('老闆娘', room, [
       { name: '你', isUser: true, text: '今天有什麼酒？' },
       { name: '老闆娘', isUser: false, text: '有剛到的麥酒。' },
     ])
-    const session = await ws.bindSession('session-rename-0001', { character: '老闆娘', chat: '夜晚' })
+    const session = await ws.bindSession('session-rename-0001', {
+      character: '老闆娘',
+      room: room,
+      chat: '夜晚',
+    })
+    // 用 `readFile` 當存在性檢查（不必新增匯入）。
+    const existsFile = (path) => readFile(path).then(() => true, () => false)
 
-    // 插圖資料夾（用正規化過的 assetId）＋ 主圖設定（用原始對話名當 key）
-    const artDir = join(root, 'rename-shop', 'art', 'chats', '老闆娘', '夜晚')
+    // 房裡的插圖（跟著房間走）
+    const artDir = join(root, 'rename-shop', 'chats', '老闆娘', room, 'art')
     await mkdir(artDir, { recursive: true })
     await writeFile(join(artDir, '微笑.png'), 'x')
-    await ws.writeSettings({ assets: { 'chat:老闆娘/夜晚': '微笑.png' } })
 
-    const renamed = await ws.renameChat('老闆娘', '夜晚', '初次見面')
-    assert.equal(renamed.name, '初次見面', '回傳新的名字')
-    assert.equal(renamed.previous, '夜晚')
-    assert.equal(renamed.file, '初次見面.jsonl')
+    const renamed = await ws.renameRoom('老闆娘', room, '初次見面')
+    assert.equal(renamed.name, '初次見面', '回傳新的顯示名稱')
+    assert.equal(renamed.room, room, '房間 id 不變（身分不是名字）')
 
-    // 1. 內容原樣搬到新檔名，舊檔消失
-    const moved = await readFile(join(root, 'rename-shop', 'chats', '老闆娘', '初次見面.jsonl'), 'utf8')
-    assert.equal(moved.split('\n').length, 4, '一行標頭 ＋ 兩則訊息，原樣搬過去')
-    assert.equal(JSON.parse(moved.split('\n')[2]).mes, '有剛到的麥酒。')
+    // 1. 資料夾、對話檔、插圖**全部留在原地**
+    assert.equal((await ws.readRoom('老闆娘', room)).name, '初次見面', '新名字寫進 room.json')
     assert.equal(
-      await stat(join(root, 'rename-shop', 'chats', '老闆娘', '夜晚.jsonl')).then(() => true, () => false),
-      false,
-      '舊檔要真的不見',
-    )
-
-    // 2. 對照表跟著搬（不然那份對話會失去它的 session）
-    assert.deepEqual(renamed.sessionIds, [session.sessionId], '要回報跟著搬的綁定')
-    // ⚠️ `.sessions` 是**一個 session 一個檔**、檔名就是 session id，
-    // 所以「跟著搬」是改那個檔裡記的對話名，不是換一個檔名。
-    assert.equal((await ws.readSession(session.sessionId)).chat, '初次見面', '綁定要指向新的對話名')
-
-    // 3. 插圖資料夾與主圖 key 一起搬
-    assert.equal(
-      await stat(join(root, 'rename-shop', 'art', 'chats', '老闆娘', '初次見面', '微笑.png')).then(() => true, () => false),
+      await existsFile(join(root, 'rename-shop', 'chats', '老闆娘', room, 'chat.jsonl')),
       true,
-      '插圖資料夾要跟著改名',
+      '對話檔沒有被搬',
     )
-    const settings = await ws.readSettings()
-    assert.equal(settings.assets['chat:老闆娘/初次見面'], '微笑.png', '主圖 key 要跟著改')
-    assert.equal(settings.assets['chat:老闆娘/夜晚'], undefined, '舊的 key 要清掉')
+    assert.equal(await existsFile(join(artDir, '微笑.png')), true, '插圖沒有被搬')
+    const kept = await ws.readRoomMessages('老闆娘', room)
+    assert.equal(kept.length, 2, '訊息原樣還在')
+    assert.equal(kept[1].text, '有剛到的麥酒。')
 
-    // 4. 改回去也成立（再搬一次）
-    const back = await ws.renameChat('老闆娘', '初次見面', '夜晚')
-    assert.equal(back.name, '夜晚', '沒有撞名時就用送進來的名字')
+    // 2. 綁定也沒被動到（它記的是 id，不是名字）
+    assert.equal((await ws.readSession(session.sessionId)).room, room, '綁定指向同一個房間 id')
 
-    // 5. 撞名**不覆蓋**：先開一份叫「初次見面」的，再把「夜晚」改成同一個名字。
-    //    回傳的 `name` 才是真的名字——呼叫端一定要用它（用自己送進來的會指向錯的檔案）。
-    await ws.createChat('老闆娘', '初次見面')
-    const collided = await ws.renameChat('老闆娘', '夜晚', '初次見面')
-    assert.notEqual(collided.name, '初次見面', '撞名時要換一個名字')
-    assert.equal(collided.name, '初次見面-2', '撞名的編號規則跟開新對話一致')
-    const kept = await readFile(join(root, 'rename-shop', 'chats', '老闆娘', '初次見面.jsonl'), 'utf8')
-    assert.equal(kept.split('\n').length, 2, '被撞到的那一份不可以被蓋掉（還是「只有標頭」的新檔）')
+    // 3. **同名不再衝突**：再開一間也叫「初次見面」的房，兩間各自存在、沒有一間被蓋掉。
+    const twin = (await ws.createRoom('老闆娘', '初次見面')).room
+    assert.notEqual(twin, room, '同名要拿到不同的房間 id')
+    assert.equal((await ws.listRooms('老闆娘')).length, 2, '兩間都在')
 
-    // 6. 錯誤路徑：不存在的對話、空名字、名字沒變（沒變要當成功，呼叫端常常是「按了 Enter 但沒改」）
-    await assert.rejects(() => ws.renameChat('老闆娘', '不存在', '隨便'), /找不到這份對話/, '不存在的對話要報錯')
-    await assert.rejects(() => ws.renameChat('老闆娘', '初次見面-2', '  '), /新的對話名稱不可為空/, '空名字要報錯')
-    const same = await ws.renameChat('老闆娘', '初次見面-2', '初次見面-2')
-    assert.equal(same.name, '初次見面-2', '名字沒變時當成功，不動任何檔案')
+    // 4. 錯誤路徑：不存在的房間要報錯；空名字**不會改掉現有的名字**（不是丟錯）
+    await assert.rejects(
+      () => ws.renameRoom('老闆娘', '不存在', '隨便'),
+      /找不到這間房/,
+      '不存在的房間要報錯',
+    )
+    await ws.renameRoom('老闆娘', room, '   ')
+    assert.equal(
+      (await ws.readRoom('老闆娘', room)).name,
+      '初次見面',
+      '空名字不會把現有的名字清掉',
+    )
 
-    console.log('16. 對話改名 OK — 檔案／綁定／插圖資料夾／主圖 key 一起搬，撞名不覆蓋')
+    console.log('16. 房間改名 OK — 只改 room.json；資料夾／對話／插圖／綁定全部不動；同名不衝突')
   }
 
   /* --------------------------- 17. 思考（reasoning）無損往返 --------------------------- */
@@ -766,29 +823,32 @@ try {
     // 思考放在訊息的 `extra.reasoning`——那是 SillyTavern 本來就有的自由欄位，
     // 所以帶著走的 `.jsonl` 裡思考不會丟，別的軟體也讀得懂那一則訊息。
     const ws = new TavernWorkspace(join(root, 'think-shop'))
-    await ws.createChat('老闆娘', '想一下')
-    await ws.appendChatMessages('老闆娘', '想一下', [
+    const room = (await ws.createRoom('老闆娘', '想一下')).room
+    await ws.appendRoomMessages('老闆娘', room, [
       { name: '你', isUser: true, text: '今天有什麼酒？' },
       { name: '老闆娘', isUser: false, text: '有麥酒。', reasoning: '他問的是酒。\n先看庫存。' },
     ])
-    const read = await ws.readChatMessages('老闆娘', '想一下')
+    const read = await ws.readRoomMessages('老闆娘', room)
     assert.equal(read.length, 2, '兩則')
     assert.equal(read[0].reasoning, '', '使用者那一則沒有思考，要回空字串（呼叫端不必再判 null）')
     assert.equal(read[1].reasoning, '他問的是酒。\n先看庫存。', '思考要原樣讀回來（含換行）')
     assert.equal(read[1].text, '有麥酒。', '思考不可以混進正文')
 
     // 檔案形狀：`extra.reasoning`，而且**沒有思考的訊息不該長出空的 extra**
-    const raw = await readFile(join(root, 'think-shop', 'chats', '老闆娘', '想一下.jsonl'), 'utf8')
+    const raw = await readFile(
+      join(root, 'think-shop', 'chats', '老闆娘', room, 'chat.jsonl'),
+      'utf8',
+    )
     const lines = raw.trim().split('\n')
     assert.equal(JSON.parse(lines[2]).extra.reasoning, '他問的是酒。\n先看庫存。', '寫成 extra.reasoning')
     assert.equal(JSON.parse(lines[1]).extra, undefined, '沒有思考的訊息不該有空的 extra')
 
     // 壞行與缺欄位照舊要能讀（既有行為不能被這一條弄壞）
     await writeFile(
-      join(root, 'think-shop', 'chats', '老闆娘', '想一下.jsonl'),
+      join(root, 'think-shop', 'chats', '老闆娘', room, 'chat.jsonl'),
       raw + JSON.stringify({ name: 'x', is_user: false, mes: '沒有 extra' }) + '\n{ 壞行\n',
     )
-    const survived = await ws.readChatMessages('老闆娘', '想一下')
+    const survived = await ws.readRoomMessages('老闆娘', room)
     assert.equal(survived.length, 3, '壞行跳過，缺 extra 的那一則照讀')
     assert.equal(survived[2].reasoning, '', '缺 extra 時 reasoning 是空字串')
 

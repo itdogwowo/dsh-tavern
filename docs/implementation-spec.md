@@ -318,7 +318,7 @@ assert.equal(source.includes("'connection'"), false)
 |---|---|
 | `<酒館>/characters/<id>.json` | 人物卡（SillyTavern V2/V3 信封） |
 | `<酒館>/worldbooks/<id>.json` | 世界書（原生 `{entries:{uid:{...}}}`） |
-| `<酒館>/chats/<角色>/<對話>.jsonl` | 對話（第一行是標頭，`chat_metadata` 是自由物件） |
+| `<酒館>/chats/<角色>/<房間id>/` | 一間房＝一個資料夾：`room.json`（設定）＋ `chat.jsonl`（對話，第一行是標頭，`chat_metadata` 是自由物件）＋ `art/`。**身分是 id，不是名字**（見 `room-layout.md`） |
 | `<酒館>/art/{characters,worldbooks,chats,tavern}/…` | 插圖（資料夾內容就是清單） |
 | `<酒館>/tavern.json` | 這間酒館的設定（含主圖指定） |
 | `<酒館>/.sessions/<sessionId>.json` | **側檔**：session → `{character, chat}`（R3）。是**索引**，掉了可以從對話檔的標頭重建 |
@@ -365,7 +365,8 @@ assert.equal(source.includes("'connection'"), false)
 | R12 遮蔽全域工具 | `test-agent.mjs` §7 ＋ 實測 | ✅ |
 | R13 世界書只做「標準」等級 | `test-worldbook.mjs` §3（四種 selectiveLogic） | ✅ |
 
-**十二條全部有測試。** 下一個工作包是 UI（`redesign.md` §4 的四個分區）。
+**十二條全部有測試。** 下一個工作包是 UI（`redesign.md` §4 的分區；現在是**五個**：
+🏠 大廳／💬 包廂／🎭 卡司／📖 藏書／⚙️ 設定）。
 
 ---
 

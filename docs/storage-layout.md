@@ -59,7 +59,7 @@ characters/老闆娘/images/微笑.png
 │   │   └── 鯨落設定/
 │   │       ├── 封面.png
 │   │       └── 鯨落港.png
-│   ├── chats/                     配對 chats/<角色>/<對話名>.jsonl
+│   ├── chats/                     房間 chats/<角色>/<房間id>/{room.json, chat.jsonl, art/}
 │   │   └── 老闆娘/
 │   │       └── 初次見面/
 │   │           └── 店內.png
@@ -75,7 +75,7 @@ characters/老闆娘/images/微笑.png
 |---|---|---|---|
 | 角色卡 | `characters/<id>.json` | 檔名去 `.json` | `art/characters/<id>/` |
 | 世界書 | `worldbooks/<id>.json` | 檔名去 `.json` | `art/worldbooks/<id>/` |
-| 對話 | `chats/<角色>/<對話名>.jsonl` | `<角色>/<對話名>` | `art/chats/<角色>/<對話名>/` |
+| 房間 | `chats/<角色>/<房間id>/chat.jsonl` | `<角色>/<房間id>` | `chats/<角色>/<房間id>/art/` |
 | 店面 | （`tavern.json` 的一部分） | （無） | `art/tavern/` |
 
 ## 3. 四個掛載點形狀完全一致——這不是巧合，是規則
@@ -101,7 +101,7 @@ characters/老闆娘/images/微笑.png
 | **B. 使用者擁有的** | `characters/*.json`、`worldbooks/*.json` | 使用者＋我們 | **原子寫入** ＋**寫之前先留一份原樣** |
 | **C. 只增不改的** | `chats/**/*.jsonl`、`art/**/*` | 我們只建立、不覆蓋 | 不需要原子性（我們根本不覆蓋） |
 
-**C 類不需要原子寫入**——這是現有設計的直接紅利：`createChat` 用 `flag: 'wx'`（獨佔建立），
+**C 類不需要原子寫入**——這是現有設計的直接紅利：`createRoom` 用 `mkdir`（不帶 `recursive`）當獨佔鎖，
 `writeAsset` 撞名自動編號（`微笑.png` → `微笑-2.png`）。**不覆蓋的檔案沒有半個檔案的風險。**
 
 ### 4.2 原子寫入是什麼
@@ -149,7 +149,7 @@ B 類有**兩個寫入者**（使用者和我們）。使用者可能同時用�
 | 規則 | 實作位置 | 測試 |
 |---|---|---|
 | 原子寫入 | `lib/write.js` 的 `atomicWrite`（暫存檔 → rename） | `smoke.mjs` 第 13 項：**真的在寫入中 SIGKILL**，正式檔必須完好；對照組（直接寫檔）被截斷成 0 bytes |
-| 獨佔建立（不覆蓋） | `lib/write.js` 的 `createExclusive` / `createUnique` | `createChat` 撞名自動編號、`ensure()` 不覆蓋既有設定檔 |
+| 獨佔建立（不覆蓋） | `lib/write.js` 的 `createExclusive` / `createUnique` | `createRoom` 用 `mkdir` 當獨佔鎖（撞到就換一個 id）、`ensure()` 不覆蓋既有設定檔 |
 | B 類寫入的無損保證 | `writeCharacter` / `writeWorldbook` 只覆蓋認識的欄位 | `test-workspace.mjs` 第 10、11 項：逐欄位往返相等（含未知欄位、`extensions`、內嵌世界書、兩種世界書方言） |
 | 來源圍籬 | `lib/index.js` 的 `originFenceFailure` | `smoke.mjs` 第 14 項：遠端／跨站／DNS rebinding／不同 Origin 全部擋下，正常本機請求通過 |
 
