@@ -622,6 +622,43 @@ try {
     // 不覆蓋：重建不該動到對話檔本身。
     // ⚠️ 一定要用 `stampedRoom.room`（上面蓋過標頭的那一間），不能用名字——
     // 這段測試裡有**兩間**都叫「夜晚」的房，而 `resolveRoom` 依名字會命中第一間。
+    /* ---- 訊息上的「用量／用时」要跟著檔案走（xtra.usage／xtra.ms）---- */
+
+    {
+      const usageRoom = await ws.createRoom('老闆娘', '用量那一間')
+      await ws.appendRoomMessages('老闆娘', usageRoom.room, [
+        { name: '你', isUser: true, text: '嗨' },
+        {
+          name: '老闆娘',
+          isUser: false,
+          text: '歡迎。',
+          reasoning: '（想一下）',
+          usage: { input: 1167, output: 13229, cacheRead: 21205376, cacheWrite: 0, reasoning: 3501 },
+          ms: 198000,
+        },
+      ])
+      const back = await ws.readRoomMessages('老闆娘', usageRoom.room)
+      assert.equal(back.length, 2, '兩則都讀回來')
+      assert.equal(back[0].usage, null, '使用者那一則沒有用量')
+      assert.equal(back[0].ms, null, '也沒有用時')
+      assert.deepEqual(
+        back[1].usage,
+        { input: 1167, output: 13229, cacheRead: 21205376, cacheWrite: 0, reasoning: 3501 },
+        '助理那一則的用量要原樣回來（DSH 那兩個標籤就是讀它）',
+      )
+      assert.equal(back[1].ms, 198000, '用時也要回來')
+      assert.equal(back[1].reasoning, '（想一下）', '思考在同一個 extra 裡，不能被蓋掉')
+      // 沒有用量的訊息：xtra 不該被塞一個空的 usage 進去。
+      await ws.appendRoomMessages('老闆娘', usageRoom.room, [
+        { name: '你', isUser: true, text: '再說一次' },
+      ])
+      const raw = await readFile(
+        join(root, 'sessions-shop', 'chats', '老闆娘', usageRoom.room, 'chat.jsonl'),
+        'utf8',
+      )
+      const last = JSON.parse(raw.split('\n').filter((line) => line !== '').pop())
+      assert.equal(last.extra, undefined, '沒東西就不要寫 extra')
+    }
     assert.equal(await ws.readChatSessionId('老闆娘', stampedRoom.room), SID)
 
     // 壞掉的索引檔 → 當作沒綁定，不要讓 Agent 面炸掉。
@@ -747,6 +784,68 @@ try {
     assert.equal(survived[3].text, '好的')
 
     console.log('15. 房間訊息 OK — 追加不覆蓋、空輸入不寫、壞行跳過、不存在時報錯')
+  }
+
+  /* --------------------- 15b. 訊息上的附件（`extra.media`）----------------- */
+
+  {
+    // 使用者：「沒法上傳檔案」。附件跟著訊息走的那一份存在 `extra.media`
+    // ——那是 **SillyTavern 自己的欄位**，所以形狀照它（`{type,url,name,bytes}`），
+    // 而且**沒有正文也寫得進去**（丟一張圖不說話是合法的）。
+    const ws = new TavernWorkspace(join(root, 'media-shop'))
+    await ws.ensure()
+    const room = (await ws.createRoom('老闆娘', '看圖')).room
+    const file = join(root, 'media-shop', 'chats', '老闆娘', room, 'chat.jsonl')
+
+    const wrote = await ws.appendRoomMessages('老闆娘', room, [
+      {
+        name: '你',
+        isUser: true,
+        text: '',
+        media: [{ type: 'image', url: '/api/dsh-tavern/files/老闆娘/' + room + '/照片.png', name: '照片.png', bytes: 1234 }],
+      },
+      {
+        name: '老闆娘',
+        isUser: false,
+        text: '這是什麼？',
+        media: [{ type: 'file', url: '/api/dsh-tavern/files/老闆娘/' + room + '/筆記.txt', name: '筆記.txt', bytes: 12 }],
+      },
+    ])
+    assert.equal(wrote, 2, '只有附件的那一則也要寫（以前空正文整則被丟掉）')
+
+    const back = await ws.readRoomMessages('老闆娘', room)
+    assert.equal(back.length, 2)
+    assert.equal(back[0].text, '', '正文可以是空的')
+    assert.equal(back[0].media.length, 1)
+    assert.equal(back[0].media[0].type, 'image')
+    assert.equal(back[0].media[0].name, '照片.png')
+    assert.equal(back[0].media[0].bytes, 1234)
+    assert.equal(back[1].media[0].type, 'file')
+    assert.equal(back[1].media[0].url, '/api/dsh-tavern/files/老闆娘/' + room + '/筆記.txt')
+
+    // 磁碟上的形狀：`extra.media`（SillyTavern 的欄位），不是我們自己發明的名字。
+    const lines = (await readFile(file, 'utf8')).split('\n').filter((line) => line !== '')
+    const record = JSON.parse(lines[1])
+    assert.equal(record.mes, '', '沒有正文就是空字串')
+    assert.deepEqual(Object.keys(record.extra), ['media'], '只有 media 時不要多寫別的欄位')
+    assert.equal(record.extra.media[0].type, 'image')
+
+    // 壞掉的媒體一律當沒有，而**那一則訊息不能被它帶走**。
+    await ws.appendRoomMessages('老闆娘', room, [
+      { name: '你', isUser: true, text: '壞資料', media: [null, { type: 'image' }, 'x', { url: '' }] },
+    ])
+    const messy = await ws.readRoomMessages('老闆娘', room)
+    assert.equal(messy.at(-1).text, '壞資料')
+    // `{url:''}` 這種「有欄位沒值」的也算壞——留著只會畫出一顆點不開的 chip。
+    assert.deepEqual(messy.at(-1).media, [], '壞掉的媒體一律當沒有')
+
+    // 沒有 media 的訊息形狀不變（既有檔案不要長出新欄位）。
+    await ws.appendRoomMessages('老闆娘', room, [{ name: '你', isUser: true, text: '普通的一則' }])
+    const plain = JSON.parse((await readFile(file, 'utf8')).split('\n').filter((line) => line !== '').at(-1))
+    assert.equal(plain.extra, undefined, '沒有附件就不要寫 extra')
+    assert.deepEqual((await ws.readRoomMessages('老闆娘', room)).at(-1).media, [], '讀回來是空陣列，不是 undefined')
+
+    console.log('15b. 訊息附件 OK — 存進 extra.media、只有附件也寫得進去、壞資料被丟掉')
   }
 
   /* ------------------------------- 16. 對話改名 ------------------------------- */

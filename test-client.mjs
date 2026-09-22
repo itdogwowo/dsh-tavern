@@ -2458,8 +2458,15 @@ function spyRpc(seen, extra) {
     assert.match(tabs[0].props.className, /dsh-tv-zoneOn/, '預設要停在「對話」')
 
     // 一次只畫一個分頁——這是「分頁」的定義，不是實作細節。
-    const onChat = flatten(renderChat())
-    assert.ok(onChat.includes('送出'), '對話分頁要有輸入與送出')
+    const onChatTree = renderChat()
+    const onChat = flatten(onChatTree)
+    // ⚠️ 送出鍵現在是**圓形圖示鍵**（照 DSH 的 `.uV2eYG_primary`），所以它的名字在
+    // `aria-label`，不是文字。用「有沒有那個按鈕」比對文字更準。
+    const sendBtn = collect(
+      onChatTree,
+      (el) => el.type === 'button' && el.props['aria-label'] === '送出',
+    )
+    assert.equal(sendBtn.length, 1, '對話分頁要有輸入與送出')
     assert.equal(onChat.includes('加入插圖'), false, '對話分頁不該同時畫插圖管理器')
 
     exportsObject.__setChatTab('art')
@@ -3180,6 +3187,453 @@ function spyRpc(seen, extra) {
   console.log('14f. 房間內改名 OK — 用房間 id 送、只換名字（其他欄位不被清掉）、這一頁不會被重置')
 }
 
+/* ------------------- 對話頁的用量列（使用者：「對話框太簡陋」）------------------- */
+
+{
+  /**
+   * 使用者：「對話框太簡陋了」＋「要上下文大小、使用、token、緩衝、命中」。
+   *
+   * 數字來自 **session 串流的開場快照**（`page.projections`：`contextPressure`／
+   * `tokenUsage`／`contextBreakdown`）——那是宿主算好、給瀏覽器讀的同一份值
+   * （DSH 自己的計量環讀它），而且**不需要那個 session 活在宿主的記憶體裡**。
+   *
+   * 這一條驗四件事：
+   *   1. 先用**酒館自己的綁定表**找 session——而且舊綁定只有顯示名稱時也要找得到
+   *      （實際回報：找不到 → 那一列一直是空的）；
+   *   2. 拿到快照之後**把串流收掉**（不要留一條連線）；
+   *   3. 每個數字都畫對（含「緩衝」＝上限 − 用量、「命中」＝快取讀 ÷ 輸入）；
+   *   4. 讀不到時**靜靜留空**，不要冒錯誤。
+   */
+  const { TavernChatPage: ChatPage } = exportsObject.__components
+  const { __setRpc, __selectChat, __setChatTab, __loadUsage, __usageOfProjections } = exportsObject
+
+  // 「本輪用量」只有串流裡那一則拿得到，所以先單獨驗它認不認得出來。
+  {
+    const usageOf = exportsObject.__chat.usageOfFrame
+    assert.equal(usageOf(null), null, '沒有 frame 就回 null')
+    assert.equal(
+      usageOf({ type: 'chunk', chunk: { type: 'text-delta', text: '嗨' } }),
+      null,
+      '文字增量不是用量',
+    )
+    const one = {
+      inputTokens: 10,
+      outputTokens: 5,
+      cacheReadTokens: 100,
+      cacheWriteTokens: 1,
+      reasoningTokens: 2,
+    }
+    assert.equal(
+      usageOf({ type: 'chunk', chunk: { type: 'usage', usage: one } }),
+      one,
+      '要認得 { type: "usage" } 那一則（本輪用量就是它）',
+    )
+
+    // 「提供方 / 模型」那一列：從快照的 records 裡最後一則 request/context 撈。
+    const routeOf = exportsObject.__chat.routeOfRecords
+    assert.equal(routeOf(null), null, '沒有 records 就回 null')
+    assert.equal(routeOf([]), null, '空的也回 null')
+    assert.equal(routeOf([{ type: 'turn/start', data: {} }]), null, '別種事件不算')
+    assert.deepEqual(
+      routeOf([
+        { type: 'request/context', data: { provider: 'a', model: 'm1' } },
+        { type: 'tool/call', data: {} },
+        { type: 'request/context', data: { provider: 'deepseek-official', model: 'deepseek-flash' } },
+      ]),
+      { provider: 'deepseek-official', model: 'deepseek-flash' },
+      '取**最後一則**（換模型之後以最新的為準）',
+    )
+
+    // 本輪輸出速度：只有真的跑過一輪、而且有輸出 token 時才算得出來。
+    const speedOf = exportsObject.__chat.turnSpeedOf
+    assert.equal(speedOf(null, 1000), null, '沒有用量就回 null')
+    assert.equal(speedOf({ outputTokens: 100 }, 0), null, '時間為零就回 null')
+    assert.equal(speedOf({ outputTokens: 100 }, 2000), 50, '100 tok ÷ 2 秒＝50 tok/s')
+  }
+
+  // 純函式那一層先單獨驗：投影的形狀改了就從這裡紅，不必開瀏覽器。
+  assert.equal(__usageOfProjections(null), null, '沒有投影就回 null')
+  assert.equal(__usageOfProjections({}), null, '三個鍵都沒有也回 null')
+  const shaped = __usageOfProjections({
+    contextPressure: { pressureTokens: 34000, projectedTokens: 34210, contextWindow: 128000 },
+    tokenUsage: {
+      uncachedInputTokens: 2145,
+      cacheReadTokens: 10000,
+      cacheWriteTokens: 200,
+      outputTokens: 1400,
+    },
+    contextBreakdown: { systemTokens: 8000, toolsTokens: 12000, messageTokens: 14000 },
+    sessionStats: {
+      turns: 125,
+      steps: 1396,
+      decodeMs: 1000000,
+      decodeTokens: 253000,
+      llmMs: 9161000,
+      toolMs: 4655000,
+      ttftMs: 2400,
+      ttftSteps: 1,
+    },
+  })
+  assert.equal(shaped.baselineTokens, 34210, '「用了多少」＝下一個請求的提示詞規模')
+  assert.equal(shaped.contextWindow, 128000, '容量來自 contextPressure')
+  assert.equal(
+    shaped.usage.input,
+    12345,
+    '輸入＝三個互不重疊的桶相加（未命中 2145 ＋ 讀 10000 ＋ 寫 200）',
+  )
+  assert.equal(shaped.usage.uncached, 2145, '「未快取輸入」要單獨留著（DSH 那個對話框會列它）')
+  assert.deepEqual(
+    shaped.parts,
+    { system: 8000, tools: 12000, messages: 14000 },
+    '構成三個數字要帶出來',
+  )
+  assert.equal(shaped.stats.turns, 125, '輪數')
+  assert.equal(shaped.stats.steps, 1396, '步數')
+  assert.equal(shaped.stats.tokPerSec, 253, '速度＝解碼 token ÷ 解碼秒數')
+  assert.equal(shaped.stats.llmMs, 9161000, '模型用時')
+  assert.equal(shaped.stats.toolMs, 4655000, '工具呼叫用時')
+  assert.equal(shaped.stats.avgTtftMs, 2400, '首 token 平均＝TTFT 總和 ÷ 有回報的步數')
+
+  const seen = []
+  let bindings = [
+    // ⚠️ 舊綁定：沒有 `room`，`chat` 放的是**顯示名稱**。
+    { sessionId: 'session-x', character: '老闆娘', room: '', chat: '夜晚' },
+    { sessionId: 'session-other', character: '酒保', room: 'other-room', chat: '打烊後' },
+  ]
+  let closed = 0
+  // ⚠️ **這是實測到的形狀**：`projections` 在 **frame 自己身上**（`type: 'snapshot'`），
+  // 不是包在 `page` 底下。一開始照型別推成 `frame.page.projections`，測試也就照著錯的
+  // 假設寫——於是測試全綠、真實頁面上那一列卻永遠不出現（無聲）。
+  // 這一條現在把**真形狀**釘住：誰把它搬回 `page` 底下，這裡會紅。
+  const snapshot = {
+    type: 'snapshot',
+    header: {},
+    cursor: 42,
+    records: [],
+    hasMore: false,
+    projections: {
+      asOfSeq: 42,
+      values: {
+        contextPressure: { pressureTokens: 34000, projectedTokens: 34210, contextWindow: 128000 },
+        tokenUsage: {
+          uncachedInputTokens: 2145,
+          cacheReadTokens: 10000,
+          cacheWriteTokens: 200,
+          outputTokens: 1400,
+        },
+        contextBreakdown: { systemTokens: 8000, toolsTokens: 12000, messageTokens: 14000 },
+        sessionStats: {
+          turns: 125,
+          steps: 1396,
+          decodeMs: 1000000,
+          decodeTokens: 253000,
+          llmMs: 9161000,
+          toolMs: 4655000,
+          ttftMs: 2400,
+          ttftSteps: 1,
+        },
+      },
+    },
+    assistantStream: null,
+  }
+  __setRpc((op, args) => {
+    seen.push({ op, args })
+    if (op === 'session.list') return Promise.resolve(bindings)
+    return Promise.resolve({})
+  })
+  exportsObject.__chat.setContext({
+    get: (key) => {
+      if (key !== 'remote.session') return undefined
+      return {
+        create: () => Promise.resolve({ sessionId: 'session-x' }),
+        follow: () => {
+          let used = false
+          return {
+            [Symbol.asyncIterator]() {
+              return {
+                next: () => {
+                  if (used) return Promise.resolve({ done: true })
+                  used = true
+                  return Promise.resolve({ done: false, value: snapshot })
+                },
+                return: () => {
+                  closed += 1
+                  return Promise.resolve({ done: true })
+                },
+              }
+            },
+          }
+        },
+      }
+    },
+  })
+
+  __selectChat({
+    character: '老闆娘',
+    room: 'm1k3x9-a7f2',
+    name: '夜晚',
+    file: 'm1k3x9-a7f2/chat.jsonl',
+  })
+  __setChatTab('chat')
+  reactImpl.resetHooks()
+  // 先渲染一次：載入函式是在渲染時填進模組層級把手的（同 `__loadChat`）。
+  renderComponent(ChatPage, {})
+  await __loadUsage()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+
+  const rowOf = () =>
+    collect(renderComponent(ChatPage, {}), (el) => el.props.className === 'dsh-tv-usage')[0]
+  const row = rowOf()
+  assert.ok(row !== undefined, '輸入框下面要有用量那一列')
+  // `flatten` 會用空白接起每個子節點，所以比對前先把連續空白收成一個——
+  // 不然「125 輪 · 253 tok/s」這種由多個節點拼出來的句子永遠比對不到。
+  const flat = (node) => flatten(node).replace(/\s+/g, ' ')
+  const text = flat(row)
+  // 卡片外面那排：**兩顆 pill**（上下文不在這裡——它在輸入框那一列的環上）。
+  assert.ok(text.includes('快取命中'), '要有快取命中率：' + text)
+  assert.ok(text.includes('81%'), '命中率＝快取讀 ÷ 輸入（10000 / 12345）')
+  // 累計那一顆是**輸入＋輸出**（跟 DSH 那顆 `586M tok` 同一個意思）。
+  assert.ok(text.includes('13.7K'), '要有累計 token（12345 ＋ 1400）：' + text)
+  // 輪／步／速度——跟 DSH 自己那排統計同樣的講法與同一條公式。
+  assert.ok(text.includes('125'), '要看得到聊了幾輪：' + text)
+  assert.ok(text.includes('1396'), '要看得到幾步')
+  assert.ok(text.includes('253 tok/s'), '要看得到解碼速度')
+  // 長相：跟 DSH 一樣**分成兩件事**——
+  //   1. 上下文環是**輸入框那一列**的圓鈕（`.JObwrW_trigger`，貼在送出鍵左邊）
+  //   2. 統計 pill 兩顆在**卡片外面**（`.bOPqQW_root`）
+  const pills = collect(row, (el) => el.props.className === 'dsh-tv-usagePill')
+  assert.equal(pills.length, 2, '卡片外面只有兩顆 pill（碼錶／資料庫）——上下文不在這裡')
+  for (const one of pills) assert.equal(one.type, 'button', '每一顆都要是可以點的按鈕（跟 DSH 一樣）')
+  const page = renderComponent(ChatPage, {})
+  const ring = collect(page, (el) => el.props.className === 'dsh-tv-usageRing')
+  assert.equal(ring.length, 1, '上下文環要是輸入框那一列裡的一顆按鈕')
+  const ringLabel = String(ring[0].props['aria-label'])
+  assert.match(ringLabel, /^上下文已用 27%/, '環要寫出用了幾 %（34210 / 128000）')
+  assert.ok(ringLabel.includes('34.2K / 128.0K'), '環的說明要有用量／上限：' + ringLabel)
+  const trail = collect(page, (el) => el.props.className === 'dsh-tv-composerTrail')
+  assert.equal(trail.length, 1, '環與送出鍵要同一組（DSH 的 uV2eYG_trailing）')
+  assert.ok(
+    collect(row, (el) => el.type === 'svg').length >= 2,
+    '兩顆 pill 都要有圖示（碼錶＋資料庫，照抄 DSH 的）',
+  )
+  assert.ok(
+    /dsh-tv-usagePill\{[^}]*background:none/.test(source) &&
+      /dsh-tv-usagePill\{[^}]*border:none/.test(source),
+    'pill 要跟 DSH 一樣沒有底色、沒有框（.bOPqQW_pill 就是這樣寫的）',
+  )
+  assert.ok(
+    /dsh-tv-usage\{[^}]*justify-content:center/.test(source),
+    '整排要置中（DSH 那排也是 justify-content:center）',
+  )
+  assert.ok(
+    /dsh-tv-usageRing\{[^}]*width:28px/.test(source) &&
+      /dsh-tv-usageRing\{[^}]*height:28px/.test(source),
+    '環要 28×28（DSH 的 .JObwrW_trigger 就是這個尺寸）',
+  )
+  // 細節收在點開的面板裡（DSH 那顆計量環也是這樣）。
+  assert.equal(text.includes('系統'), false, '摘要那一行不該塞細節，收進面板')
+
+  // ⚠️ **每一顆按鈕開自己那一份**（使用者：「顯示資料他會分多個按鈕分開顯示」）——
+  // 不是全部塞進同一個面板。點環＝上下文、點碼錶＝會話統計、點資料庫＝Token 用量。
+  const pageNow = () => renderComponent(ChatPage, {})
+  const ringBtn = collect(pageNow(), (el) => el.props.className === 'dsh-tv-usageRing')[0]
+  const pillsNow = () => collect(pageNow(), (el) => el.props.className === 'dsh-tv-usagePill')
+
+  // ① 環 → 只有上下文
+  ringBtn.props.onClick()
+  const ctxPanel = flat(rowOf())
+  assert.ok(ctxPanel.includes('提示詞'), '點環要看得到提示詞：' + ctxPanel)
+  assert.ok(ctxPanel.includes('緩衝 93,790 tok'), '「緩衝」＝上限 − 用量（精確值）')
+  assert.ok(ctxPanel.includes('系統'), '要有提示詞的組成')
+  assert.equal(ctxPanel.includes('會話統計'), false, '環那一份不該混進會話統計')
+  assert.equal(ctxPanel.includes('Token 用量'), false, '環那一份不該混進 Token 用量')
+
+  // ② 碼錶 → 只有會話統計（＋本輪用時的位置）
+  const clock = pillsNow()[0]
+  assert.ok(typeof clock.props.onClick === 'function', '那一顆要能點開')
+  clock.props.onClick()
+  const statsPanel = flat(rowOf())
+  assert.ok(statsPanel.includes('會話統計'), '點碼錶要看得到會話統計：' + statsPanel)
+  assert.ok(statsPanel.includes('模型用時'), '要列模型用時')
+  assert.ok(statsPanel.includes('152分41秒'), '時間格式照 DSH（超過一分鐘寫 152分41秒）')
+  assert.ok(statsPanel.includes('工具呼叫用時'), '要列工具呼叫用時')
+  assert.ok(statsPanel.includes('首 token 平均（TTFT）'), '要列首 token 平均')
+  assert.ok(statsPanel.includes('2.4秒'), '不到一分鐘寫成 2.4秒')
+  assert.ok(statsPanel.includes('輸出速度（TPS）'), '要列輸出速度')
+  assert.equal(statsPanel.includes('Token 用量（累計）'), false, '碼錶那一份不該混進 Token 用量')
+  assert.equal(statsPanel.includes('提示詞'), false, '碼錶那一份不該混進上下文')
+  // 本輪用時：沒跑過任何一輪時**不出現**（不要編數字）。
+  assert.equal(statsPanel.includes('本輪用時'), false, '還沒跑過這一輪就不該有「本輪用時」')
+
+  // ③ 資料庫 → 只有 Token 用量（＋本輪用量）
+  const db = pillsNow()[1]
+  db.props.onClick()
+  const tokPanel = flat(rowOf())
+  assert.ok(tokPanel.includes('Token 用量（累計）'), '點資料庫要看得到 Token 用量：' + tokPanel)
+  assert.ok(tokPanel.includes('未快取輸入 2,145 tok'), '未快取輸入要是精確值')
+  assert.ok(tokPanel.includes('快取讀取 10,000 tok'), '快取讀取要是精確值')
+  assert.ok(tokPanel.includes('快取寫入 200 tok'), '快取寫入不為零時要列')
+  assert.ok(tokPanel.includes('輸出 1,400 tok'), '輸出要是精確值')
+  assert.ok(tokPanel.includes('合計 13,745 tok'), '合計＝輸入＋輸出')
+  assert.equal(tokPanel.includes('會話統計'), false, '資料庫那一份不該混進會話統計')
+  assert.equal(tokPanel.includes('本輪用量'), false, '還沒跑過這一輪就不該有「本輪用量」')
+  assert.ok(tokPanel.includes('重新讀取'), '面板裡要有「重新讀取」')
+
+  // 再點同一顆＝收起來（每一顆自己切換）。
+  // ⚠️ 要用**最新那次渲染**拿到的那一顆：它的閉包記著「當時哪一顆是開著的」，
+  // 拿舊的元素來點會變成「換到 tokens」而不是「收起 tokens」。
+  pillsNow()[1].props.onClick()
+  assert.equal(flat(rowOf()).includes('Token 用量'), false, '點同一顆要收起來')
+
+  // ⚠️ **點外面也要收起來**（使用者：「我應該點擊外面就會縮回去」）。那一條住在
+  // `useEffect` 裡，而離線測試的假 React 不跑 effect——所以這裡驗的是原始碼層級：
+  // 有掛 `mousedown`、而且點在面板／pill／環上面會放行（不然會開了又立刻關）。
+  assert.ok(
+    /document\.addEventListener\('mousedown', onDown\)/.test(source) &&
+      /document\.removeEventListener\('mousedown', onDown\)/.test(source),
+    '要掛「點外面就收起」的 listener，而且收起來時要拆掉',
+  )
+  assert.ok(
+    /target\.closest\('\.dsh-tv-usagePanel'\) !== null\) return/.test(source) &&
+      /target\.closest\('\.dsh-tv-usagePill'\) !== null\) return/.test(source) &&
+      /target\.closest\('\.dsh-tv-usageRing'\) !== null\) return/.test(source),
+    '點在面板／pill／環上面不算「外面」',
+  )
+  assert.ok(
+    /message\.turnUsage\.model|提供方 \/ 模型/.test(source),
+    '「本輪用量」要有一列「提供方 / 模型」（DSH 的 message.turnUsage.model）',
+  )
+  assert.ok(
+    /本輪用時和速度/.test(source) && /本輪輸出速度/.test(source),
+    '那一節叫「本輪用時和速度」，而且要有本輪的輸出速度',
+  )
+
+  const asks = seen.filter((one) => one.op === 'session.list')
+  assert.equal(asks.length >= 1, true, '要先去酒館自己的綁定表找 session')
+  assert.equal(closed >= 1, true, '拿到快照就要把串流收掉（不要留一條連線在背景）')
+
+  // 沒有綁定（這一間房還沒開始聊）→ 不畫那一列，也不要錯誤訊息。
+  bindings = []
+  await __loadUsage()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(rowOf(), undefined, '讀不到用量就留空，不要畫一個 0 騙人')
+
+  // 權限說明：使用者說「描述都非常差」——所以寫的是**它拿到什麼**，不是工具名稱。
+  assert.equal(/read、glob、grep/.test(source), false, '權限選項不可以只寫工具名稱')
+  assert.equal(/web_search、web_fetch/.test(source), false, '同理，上網那一項也不可以')
+  assert.ok(
+    /它看不到你的檔案，也不能跑指令/.test(source),
+    '「全關」要寫成人話：它看不到你的檔案、也不能跑指令',
+  )
+  assert.ok(
+    /它可以自己翻角色卡、世界書與對話紀錄/.test(source),
+    '「只讀」要寫成它真的能做的事',
+  )
+
+  exportsObject.__chat.setContext(null)
+  __setChatTab('chat')
+  __selectChat(null)
+  reactImpl.resetHooks()
+  console.log('14h. 對話頁用量列 OK — 綁定表找 session、快照讀投影、收掉串流、讀不到就留空')
+}
+
+/* ---------- 訊息上那兩個小標籤（用量／用时）——DSH 掛在訊息上，不是掛在面板上 ---------- */
+
+{
+  /**
+   * 使用者貼的是 DSH 訊息上那兩個元素：`用量 22.6M tok`、`用时 3分28秒`。
+   *
+   * 所以它們要跟著**訊息**走：`chat.jsonl` 的 `extra.usage`／`extra.ms`
+   * （宿主半的寫入／讀出由 `test-workspace.mjs` 釘住，這裡驗「畫得出來」），
+   * 而且只有助理訊息、而且真的記到了才畫。
+   */
+  const { TavernChatPage: ChatPage } = exportsObject.__components
+  const { __setRpc, __selectChat, __setChatTab, __loadChat } = exportsObject
+  // ⚠️ 自己一份：lat 是上一個區塊的區域變數（同一個檔案裡的 {} 各自是作用域）。
+  const flat = (node) => flatten(node).replace(/\s+/g, ' ')
+
+  const messages = [
+    { name: '你', isUser: true, text: '嗨', sendDate: '' },
+    {
+      name: '老闆娘',
+      isUser: false,
+      text: '歡迎。',
+      sendDate: '',
+      reasoning: '',
+      usage: { input: 1167, output: 13229, cacheRead: 21205376, cacheWrite: 0, reasoning: 3501 },
+      ms: 198000,
+    },
+    // 舊訊息（沒有那兩個欄位）——不該畫出 0 或 0秒。
+    { name: '老闆娘', isUser: false, text: '（舊的）', sendDate: '', reasoning: '' },
+  ]
+  __setRpc((op) => {
+    if (op === 'chat.messages') return Promise.resolve(messages)
+    return Promise.resolve({})
+  })
+
+  __selectChat({
+    character: '老闆娘',
+    room: 'm1k3x9-a7f2',
+    name: '夜晚',
+    file: 'm1k3x9-a7f2/chat.jsonl',
+  })
+  __setChatTab('chat')
+  reactImpl.resetHooks()
+  renderComponent(ChatPage, {})
+  await __loadChat()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+
+  const tree = renderComponent(ChatPage, {})
+  const metas = collect(tree, (el) => el.props.className === 'dsh-tv-msgMeta')
+  assert.equal(metas.length, 1, '只有那一則有記到用量的助理訊息才有那兩個標籤')
+  const metaText = flat(metas[0]).trim()
+  assert.ok(metaText.includes('用量 14.4K tok'), '要有「用量 … tok」（1167 ＋ 13229）：' + metaText)
+  assert.ok(metaText.includes('用时 3分18秒'), '要有「用时 …」（198000ms → 3分18秒）')
+  assert.equal(
+    collect(metas[0], (el) => el.type === 'svg').length,
+    2,
+    '兩個標籤各有一個圖示（資料庫／時鐘，照抄 DSH 的）',
+  )
+  assert.equal(
+    collect(tree, (el) => el.props.className === 'dsh-tv-msgMeta').length,
+    1,
+    '舊訊息（沒有欄位）不畫那兩個標籤',
+  )
+
+  // ⚠️ **整份「本輪用量」也在訊息上**（使用者：「還有這些資訊你剛才放錯位置了」）：
+  // 點「用量」那一顆就展開那一輪的細節，跟 DSH 那組 `message.turnUsage.*` 一樣。
+  assert.equal(
+    collect(tree, (el) => el.props.className === 'dsh-tv-msgPanel').length,
+    0,
+    '沒點之前不展開',
+  )
+  const useBtn = collect(
+    metas[0],
+    (el) => el.type === 'button' && String(el.props.className).indexOf('dsh-tv-msgMetaBtn') >= 0,
+  )[0]
+  assert.ok(useBtn !== undefined, '「用量」那一顆要可以點開細節')
+  useBtn.props.onClick()
+  const openedMeta = flat(
+    collect(
+      renderComponent(ChatPage, {}),
+      (el) => el.props.className === 'dsh-tv-msgMeta',
+    )[0],
+  )
+  assert.ok(openedMeta.includes('本輪用量'), '點開要看得到「本輪用量」：' + openedMeta)
+  assert.ok(openedMeta.includes('合計 14,396 tok'), '合計＝輸入＋輸出（精確值加千分位）')
+  assert.ok(openedMeta.includes('未快取輸入 1,167 tok'), '未快取輸入')
+  assert.ok(openedMeta.includes('快取讀取 21,205,376 tok'), '快取讀取')
+  assert.ok(openedMeta.includes('輸出 13,229 tok（其中推理 3,501 tok）'), '輸出要帶推理')
+  assert.ok(openedMeta.includes('本輪用時和速度'), '要有「本輪用時和速度」那一節')
+  assert.ok(openedMeta.includes('本輪總用時 3分18秒'), '本輪總用時')
+  assert.ok(openedMeta.includes('本輪輸出速度'), '本輪輸出速度')
+
+  __setChatTab('chat')
+  __selectChat(null)
+  reactImpl.resetHooks()
+  console.log('14i. 訊息用量標籤 OK — 用量／用时跟著訊息走，點開是本輪用量與用時和速度')
+}
+
 /* ------------------- ＋ 是來回鍵（使用者：「重新點擊 ＋ 不會跳回去」）------------------- */
 
 {
@@ -3240,6 +3694,196 @@ function spyRpc(seen, extra) {
   reactImpl.resetHooks()
   __setZone('hall')
   console.log('14g. ＋ 是來回鍵 OK — 第一次去包廂、第二次回對話、沒對話可回時不亂跳')
+}
+
+/* ------------------- 附件（使用者：「沒法上傳檔案」）------------------- */
+
+{
+  /**
+   * 附件要驗的是**組裝**：一個檔案要變成「送給模型的那一份」與「畫在訊息上的那一份」。
+   *
+   * 兩邊錯了都不會丟錯，只會靜靜地不對：
+   *   - prompt content 少了 part → 模型什麼都沒收到（回覆照樣來，只是它沒看過那張圖）
+   *   - `media` 留了一顆沒有 url 的 chip → 畫面上有一個點不開的東西
+   * 所以這一節把形狀逐項釘住。
+   */
+  const { kindOf, formatBytes, mediaOf, previewMediaOf, buildPromptContent } =
+    exportsObject.__attach
+
+  // 1. 圖片與檔案的分岔：**照 DSH 的 `ImageMediaType` 四種**，其餘一律走檔案那條路。
+  assert.equal(kindOf('image/png'), 'image')
+  assert.equal(kindOf('image/jpeg'), 'image')
+  assert.equal(kindOf('image/webp'), 'image')
+  assert.equal(kindOf('image/gif'), 'image')
+  assert.equal(kindOf('image/svg+xml'), 'file', 'SVG 不在 DSH 的圖片白名單裡 → 走檔案')
+  assert.equal(kindOf('application/pdf'), 'file')
+  assert.equal(kindOf(''), 'file', '沒有 MIME 的一律當檔案（不要硬塞給模型當圖）')
+
+  // 2. 大小給人看
+  assert.equal(formatBytes(0), '0 B')
+  assert.equal(formatBytes(999), '999 B')
+  assert.equal(formatBytes(2048), '2.0 KB')
+  assert.equal(formatBytes(3 * 1024 * 1024), '3.00 MB')
+
+  // 3. `media`：有名字就留著（即使還沒存進房間）
+  //
+  // ⚠️ 這一條一開始寫成「沒有 url 就丟掉」，結果在真瀏覽器上量到：**按下送出的瞬間，
+  // 自己那一則訊息連同附件整顆不見**（那時還沒存進房間，所以 url 是空的）。
+  // 正確的規矩是「**名字在就留著**」——畫面上變成一顆不能點的 chip，比什麼都不畫誠實。
+  const stored = [
+    { kind: 'image', url: '/api/dsh-tavern/files/a/b/x.png', name: 'x.png', bytes: 10 },
+    { kind: 'file', url: '', name: 'y.txt', bytes: 20 },
+    { kind: 'file', url: '', name: '' },
+  ]
+  assert.deepEqual(mediaOf(stored), [
+    { type: 'image', url: '/api/dsh-tavern/files/a/b/x.png', name: 'x.png', bytes: 10 },
+    { type: 'file', url: '', name: 'y.txt', bytes: 20 },
+  ], '名字在就留著（還沒有 url 也一樣）；連名字都沒有才丟掉')
+
+  // 4. 送出**當下**那一份：優先用本輪的預覽 URL
+  assert.deepEqual(
+    previewMediaOf([
+      { kind: 'image', url: '', previewUrl: 'blob:x', name: 'x.png', bytes: 10 },
+      { kind: 'file', url: '/api/dsh-tavern/files/a/b/y.txt', previewUrl: '', name: 'y.txt', bytes: 20 },
+      { kind: 'file', url: '', previewUrl: '', name: 'z.txt', bytes: 1 },
+      { kind: 'file', url: '', previewUrl: '', name: '', bytes: 0 },
+    ]),
+    [
+      { type: 'image', url: 'blob:x', name: 'x.png', bytes: 10 },
+      { type: 'file', url: '/api/dsh-tavern/files/a/b/y.txt', name: 'y.txt', bytes: 20 },
+      { type: 'file', url: '', name: 'z.txt', bytes: 1 },
+    ],
+    '圖片用預覽、檔案用房間那一份；還沒存到的留名字（不能點的 chip）',
+  )
+
+  // 5. prompt content：**附件在前面、文字在後面**（DSH 的順序）
+  const content = buildPromptContent(
+    [
+      { kind: 'image', mediaType: 'image/png', data: 'AAA', name: '照片.png' },
+      { kind: 'file', receiptId: 'receipt-1' },
+    ],
+    '這張圖是什麼？',
+  )
+  assert.deepEqual(content, [
+    { type: 'image', mediaType: 'image/png', data: 'AAA', name: '照片.png' },
+    { type: 'file', receiptId: 'receipt-1' },
+    { type: 'text', text: '這張圖是什麼？' },
+  ])
+
+  // 6. 缺料的 part 一律丟掉（寧可少送，不要送出宿主會拒絕的形狀）
+  assert.deepEqual(buildPromptContent([{ kind: 'image', mediaType: 'image/png', data: '' }], '嗨'), [
+    { type: 'text', text: '嗨' },
+  ], '沒有位元組的圖片不算一個 part')
+  assert.deepEqual(buildPromptContent([{ kind: 'file' }], '嗨'), [{ type: 'text', text: '嗨' }], '沒有 receiptId 的檔案不算')
+  assert.deepEqual(buildPromptContent([{ kind: 'file', receiptId: 'r' }], '   '), [
+    { type: 'file', receiptId: 'r' },
+  ], '只丟檔案不說話是合法的（空白文字不送 text part）')
+  assert.deepEqual(buildPromptContent(null, ''), [], '什麼都沒有就是空的（呼叫端不該送出）')
+  // 圖片的 name 是選填的：沒有就不要放一個空字串進去
+  assert.deepEqual(buildPromptContent([{ kind: 'image', mediaType: 'image/gif', data: 'B' }], ''), [
+    { type: 'image', mediaType: 'image/gif', data: 'B' },
+  ])
+
+  // 7. 原始碼層級：送出時真的把 content 交給 prompt、訊息帶著 media 寫回紀錄
+  assert.match(
+    source,
+    /\.prompt\(\{ requestId: requestId, sessionId: sessionId, mode: 'queue', content: content \}\)/,
+    'prompt 要送**組好的 content**（不是只有純文字）',
+  )
+  assert.match(
+    source,
+    /\{ name: '你', isUser: true, text: text, media: mediaOfAttachments\(pending\) \}/,
+    '使用者那一則要把附件寫進 chat.jsonl（`extra.media`）',
+  )
+  assert.match(source, /ctxRef\.get\('fileUpload'\)/, '非圖片要走 DSH 的 fileUpload 服務拿 receiptId')
+  assert.match(source, /parts\.push\(\{ type: 'file', receiptId: one\.receiptId \}\)/, 'receiptId 要包成 file part')
+  assert.match(source, /function attachmentKindOf[\s\S]{0,400}?indexOf\(mediaType\)/, '分流要看 MIME 白名單')
+
+  // 7b. 回歸：送出時**不可以**被自己的「內容變了」通知重讀掉那一則訊息。
+  //
+  // `setChatRunning(true)` 會 bump `refreshChannel`（側邊欄那一列的跑馬燈要重畫），
+  // 而對話頁訂閱了它並在裡面 `loadMessages()`——磁碟上還沒有剛送出的那一則，
+  // 於是使用者按下送出的同一瞬間，自己的訊息與附件就消失了（真瀏覽器上量到的）。
+  assert.match(
+    source,
+    /useRefreshVersion\(function \(\) \{\s*if \(selected === null\) return[\s\S]{0,1200}?if \(chat\.busy === true \|\| chat\.writing === true\) return/,
+    '這一輪還在跑（或還在寫回紀錄）時不要重讀訊息（會蓋掉剛送出、還沒寫回磁碟的那一則）',
+  )
+
+  // 8. 畫面上：那一則訊息的圖片與檔案 chip 真的畫得出來
+  const { TavernChatPage: ChatPage } = exportsObject.__components
+  const { __setRpc, __selectChat, __setChatTab, __loadChat } = exportsObject
+  const flat = (node) => flatten(node).replace(/\s+/g, ' ')
+
+  const room = 'm1k3x9-a7f2'
+  const mediaRoom = [
+    {
+      name: '你',
+      isUser: true,
+      text: '',
+      sendDate: '',
+      media: [
+        { type: 'image', url: '/api/dsh-tavern/files/老闆娘/' + room + '/照片.png', name: '照片.png', bytes: 2048 },
+        { type: 'file', url: '/api/dsh-tavern/files/老闆娘/' + room + '/筆記.txt', name: '筆記.txt', bytes: 1024 },
+      ],
+    },
+    { name: '老闆娘', isUser: false, text: '收到了。', sendDate: '' },
+  ]
+  __setRpc((op) => {
+    if (op === 'chat.messages') return Promise.resolve(mediaRoom)
+    return Promise.resolve({})
+  })
+  __selectChat({ character: '老闆娘', room: room, name: '夜晚', file: room + '/chat.jsonl' })
+  __setChatTab('chat')
+  reactImpl.resetHooks()
+  renderComponent(ChatPage, {})
+  await __loadChat()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const tree = renderComponent(ChatPage, {})
+
+  const images = collect(tree, (el) => el.props.className === 'dsh-tv-msgImg')
+  assert.equal(images.length, 1, '圖片要畫出來')
+  assert.equal(images[0].props.src, '/api/dsh-tavern/files/老闆娘/' + room + '/照片.png', 'src 要用房間那一份')
+  assert.equal(images[0].props.loading, 'lazy')
+  const chips = collect(tree, (el) => el.props.className === 'dsh-tv-fileChip')
+  assert.equal(chips.length, 1, '其他檔案是一顆 chip')
+  assert.equal(chips[0].props.href, '/api/dsh-tavern/files/老闆娘/' + room + '/筆記.txt', 'chip 要點得開')
+  assert.equal(chips[0].props.target, '_blank')
+  assert.ok(flat(chips[0]).includes('筆記.txt'), 'chip 上要有檔名')
+  assert.ok(flat(chips[0]).includes('1.0 KB'), 'chip 上要有大小：' + flat(chips[0]))
+
+  // 沒有附件的訊息不該長出那一區（既有畫面不變）
+  const mediaRows = collect(tree, (el) => el.props.className === 'dsh-tv-msgMedia')
+  assert.equal(mediaRows.length, 1, '只有帶附件的那一則才有附件區')
+
+  // 9. 輸入區：📎 那顆按鈕與它按的隱藏 input 都在
+  const attachBtn = collect(
+    tree,
+    (el) => el.type === 'button' && String(el.props.className).indexOf('dsh-tv-attachBtn') >= 0,
+  )[0]
+  assert.ok(attachBtn !== undefined, '輸入框那一列要有附件鈕（使用者回報「沒法上傳檔案」）')
+  assert.equal(attachBtn.props.title.includes('圖片'), true, '要說得出來它接受什麼')
+  const fileInputs = collect(tree, (el) => el.type === 'input' && el.props.type === 'file')
+  assert.equal(fileInputs.length, 1, '要有一個隱藏的檔案挑選器')
+  assert.equal(fileInputs[0].props.multiple, true, '可以一次挑好幾個')
+  assert.equal(fileInputs[0].props.style.display, 'none', '挑選器本身不露出來')
+  assert.equal(typeof fileInputs[0].props.onChange, 'function', '挑完要有人接')
+  // 按鈕本身在離線環境拿不到真的 DOM 節點（假 React 不處理 ref），
+  // 所以這裡只驗它不會炸——「有沒有開挑選器」由原始碼那一條釘住。
+  attachBtn.props.onClick()
+  assert.match(source, /attachInput\.current\.click\(\)/, '按鈕要開那個挑選器')
+
+  // 10. 挑檔案之後：`pickFiles` 的活 FileList 陷阱（三個舊 input 都中過）也要套用在附件上
+  assert.match(
+    source,
+    /addAttachments\(pickFiles\(event\)\)/,
+    '附件的 change 一定要走 pickFiles（先複製再清 value，不然檔案永遠送不出去）',
+  )
+
+  __setChatTab('chat')
+  __selectChat(null)
+  reactImpl.resetHooks()
+  console.log('14j. 附件 OK — 圖片／檔案分流、content 附件在前、訊息畫得出來、📎 與挑選器都在')
 }
 
 /* ------------------------------ 逐個元件試渲染 ------------------------------ */

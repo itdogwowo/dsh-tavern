@@ -1,6 +1,6 @@
 {
   "name": "dsh-tavern",
-  "version": "2.6.9",
+  "version": "2.6.42",
   "description": "酒館模式：一間酒館＝一個你選的資料夾。新增時在裡面建立人物卡／世界書／對話／設定的結構，UI 只讀寫這些檔案",
   "license": "MIT",
   "author": "itdogwowo",
@@ -19,6 +19,7 @@
     "lib/registry.js",
     "lib/workspace.js",
     "lib/assets.js",
+    "lib/roomfiles.js",
     "lib/pngcard.js",
     "lib/write.js",
     "lib/defaults.js",

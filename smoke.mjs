@@ -53,12 +53,14 @@ ctx.webServer = {
 tavern.apply(ctx)
 assert.deepEqual(tavern.inject, ['webServer'], '宿主半只應該依賴 webServer（其餘全是檔案 I/O）')
 const rpcRoute = calls.routes.find((route) => route.path === '/api/dsh-tavern/rpc')
-const assetRoute = calls.routes.find(
-  (route) => route.kind === 'prefix' && route.path.startsWith('/api/dsh-tavern/'),
-)
+const assetRoute = calls.routes.find((route) => route.path === '/api/dsh-tavern/assets')
+// 附件（房間的 `files/`）是**第二條** prefix 路由，形狀與插圖那條一樣。
+const fileRoute = calls.routes.find((route) => route.path === '/api/dsh-tavern/files')
 assert.ok(rpcRoute !== undefined, 'RPC 路由應已註冊')
 assert.equal(rpcRoute.kind, 'exact')
 assert.ok(assetRoute !== undefined, '插圖路由應已註冊')
+assert.ok(fileRoute !== undefined, '附件路由應已註冊')
+assert.equal(fileRoute.kind, 'prefix')
 // 回歸守衛：`webServer` 的 prefix 比對是
 //   pathname === prefix || pathname.startsWith(prefix + '/')
 // 註冊字串結尾若多一個斜線，比對就變成 `startsWith('…assets//')`，
@@ -70,6 +72,11 @@ assert.ok(
   '插圖路由的註冊路徑要能比對到真實的資產 URL（結尾多一個斜線就會永遠比對不到）',
 )
 assert.equal(assetRoute.kind, 'prefix')
+// 附件路由（`/api/dsh-tavern/files`）是同一個形狀、同一個陷阱——一起釘住。
+assert.ok(
+  prefixMatches(fileRoute.path, '/api/dsh-tavern/files/角色/room-1/a.txt'),
+  '附件路由的註冊路徑要能比對到真實的附件 URL（結尾多一個斜線就會永遠比對不到）',
+)
 console.log('1. 掛載 OK — inject =', JSON.stringify(tavern.inject), '/ 兩條路由都在')
 
 /**
@@ -150,6 +157,24 @@ async function fetchAsset(path, headers) {
     },
   }
   await assetRoute.handler(localRequest('GET', '/api/dsh-tavern/assets/' + path, headers), res)
+  return res
+}
+
+/** 直接讀附件路由。 */
+async function fetchRoomFile(path, headers) {
+  const res = {
+    status: 0,
+    body: undefined,
+    headers: {},
+    writeHead(status, next) {
+      res.status = status
+      if (next !== undefined) res.headers = next
+    },
+    end(body) {
+      res.body = body
+    },
+  }
+  await fileRoute.handler(localRequest('GET', '/api/dsh-tavern/files/' + path, headers), res)
   return res
 }
 
@@ -722,6 +747,131 @@ function pngCard(entries) {
   console.log('11d. 刪除對話 OK — 刪檔案、解綁定、不存在時明確報錯')
 }
 
+/* --- 11e. 附件（訊息裡夾帶的檔案／圖片）--------------------------------- */
+{
+  // 使用者：「沒法上傳檔案」。附件有**兩份**：送給模型的那一份走 DSH 的附件服務
+  // （客戶端的事，這裡驗不到），而**房間裡那一份**是這一組 op 負責的——它才是
+  // 「重新整理之後還畫得出來」與「資料夾帶走就好」的那一份。
+  const attachShop = mkdtempSync(join(tmpdir(), 'tavern-attach-shop-'))
+  const added = await callRpc('tavern.add', { path: attachShop })
+  const tavernId = added.value.added.id
+  const made = await callRpc('chat.create', { character: '老闆娘', name: '附件房' })
+  assert.equal(made.ok, true, '先開一間房：' + made.error)
+  const room = made.value.room
+
+  const query = (name) =>
+    '&id=' +
+    encodeURIComponent(tavernId) +
+    '&character=' +
+    encodeURIComponent('老闆娘') +
+    '&room=' +
+    encodeURIComponent(room) +
+    '&name=' +
+    encodeURIComponent(name)
+
+  // 1. 檔案（非圖片）原樣寫進 `<room>/files/`
+  const note = Buffer.from('這是一份筆記\n第二行\n', 'utf8')
+  const wroteNote = await callRpc('file.write', note, { query: query('筆記.txt') })
+  assert.equal(wroteNote.ok, true, 'file.write 應該存在而且成功：' + wroteNote.error)
+  assert.equal(
+    existsSync(join(attachShop, 'chats', '老闆娘', room, 'files', '筆記.txt')),
+    true,
+    '附件要落在房間的 files/ 底下',
+  )
+  assert.equal(readFileSync(join(attachShop, 'chats', '老闆娘', room, 'files', '筆記.txt'), 'utf8'), note.toString('utf8'), '位元組要原樣')
+  assert.match(wroteNote.value.url, /^\/api\/dsh-tavern\/files\//, '要回可以直接串的 URL')
+
+  // 2. 圖片也走同一條路（附件不分種類），清單要認得出它是圖片
+  const wroteImage = await callRpc('file.write', pngBytes(6), { query: query('照片.png') })
+  assert.equal(wroteImage.ok, true, wroteImage.error)
+
+  const listed = await callRpc('file.list', { character: '老闆娘', room: room })
+  assert.equal(listed.ok, true, 'file.list 應該存在：' + listed.error)
+  assert.equal(listed.value.length, 2)
+  const byName = Object.fromEntries(listed.value.map((item) => [item.name, item]))
+  assert.equal(byName['照片.png'].type, 'image', 'png 要認成圖片（訊息裡畫得出來）')
+  assert.equal(byName['筆記.txt'].type, 'file', '其他一律當檔案（一顆 chip）')
+
+  // 3. 撞名自動編號（跟插圖同一支 `uniqueName`）
+  const again = await callRpc('file.write', Buffer.from('第二份'), { query: query('筆記.txt') })
+  assert.equal(again.value.name, '筆記-2.txt', '同名要自動編號，不要覆蓋使用者的檔案')
+  assert.equal(again.value.renamed, true)
+
+  // 4. 讀取路由：位元組要一模一樣，而且類型不能亂猜
+  const got = await fetchRoomFile('老闆娘/' + room + '/筆記.txt')
+  assert.equal(got.status, 200, '附件要讀得回來')
+  assert.equal(String(got.body), '這是一份筆記\n第二行\n')
+  assert.match(String(got.headers['content-type']), /^text\/plain/, '副檔名對得上就用對的型別')
+  assert.equal(got.headers['x-content-type-options'], 'nosniff', '任意檔案一定要 nosniff')
+  assert.equal(got.headers['content-disposition'], 'attachment', '非圖片一律當下載（不要 inline 執行）')
+  const gotImage = await fetchRoomFile('老闆娘/' + room + '/照片.png')
+  assert.equal(gotImage.headers['content-disposition'], 'inline', '圖片才 inline')
+
+  // 5b. ⚠️ SVG **不可以** inline（同源 inline 的 SVG 裡面的 script 會在 app 的 origin
+  //     上執行）。它看起來是圖片，所以這一條特別容易寫錯。
+  const wroteSvg = await callRpc('file.write', Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>'), {
+    query: query('向量.svg'),
+  })
+  assert.equal(wroteSvg.ok, true, wroteSvg.error)
+  const gotSvg = await fetchRoomFile('老闆娘/' + room + '/向量.svg')
+  assert.equal(gotSvg.headers['content-disposition'], 'attachment', 'SVG 要當下載，不能 inline')
+  assert.equal(gotSvg.headers['content-type'], 'image/svg+xml', '型別照舊（下載時的檔名提示靠它）')
+  const svgInList = (await callRpc('file.list', { character: '老闆娘', room: room })).value.find(
+    (item) => item.name === '向量.svg',
+  )
+  assert.equal(svgInList.type, 'file', 'SVG 在清單裡也不是「圖片」（訊息裡不畫成 <img>）')
+
+  // 5. 路徑跳脫／不存在的檔名都要被擋下（跟插圖那條同一組圍籬）
+  const escape = await fetchRoomFile('老闆娘/' + room + '/' + encodeURIComponent('../room.json'))
+  assert.equal(escape.status, 404, '檔名不合法要 404，不能穿出房間')
+  const nope = await fetchRoomFile('老闆娘/' + room + '/沒有這個.txt')
+  assert.equal(nope.status, 404)
+
+  // 6. 訊息帶著附件 → `extra.media`（SillyTavern 的欄位），而且**沒有正文也寫得進去**
+  const appended = await callRpc('room.append', {
+    character: '老闆娘',
+    room: room,
+    messages: [{ name: '你', isUser: true, text: '', media: [{ type: 'file', url: wroteNote.value.url, name: '筆記.txt', bytes: note.length }] }],
+  })
+  assert.equal(appended.ok, true, appended.error)
+  assert.equal(appended.value, 1, '只有附件、沒有文字的那一則也要寫進紀錄')
+
+  const messages = await callRpc('room.messages', { character: '老闆娘', room: room })
+  const withMedia = messages.value.find((message) => Array.isArray(message.media) && message.media.length > 0)
+  assert.ok(withMedia !== undefined, '附件的訊息要讀得回來')
+  assert.equal(withMedia.media[0].name, '筆記.txt')
+  assert.equal(withMedia.media[0].type, 'file')
+  assert.equal(withMedia.text, '', '沒有正文是可以的（丟一張圖不說話）')
+
+  // 7. 壞掉的 media 不會讓整則訊息寫不進去（寬鬆解析，跟其他欄位同一個規矩）
+  await callRpc('room.append', {
+    character: '老闆娘',
+    room: room,
+    messages: [{ name: '你', isUser: true, text: '有壞資料', media: [null, { type: 'file' }, 'x'] }],
+  })
+  const messages2 = await callRpc('room.messages', { character: '老闆娘', room: room })
+  assert.equal(messages2.value.at(-1).text, '有壞資料', '壞掉的 media 不該讓那一則消失')
+  assert.deepEqual(messages2.value.at(-1).media, [], '壞掉的媒體一律當沒有')
+
+  // 8. 刪除（明確實體刪除，跟插圖同一個哲學：不自動清理孤兒）
+  const deleted = await callRpc('file.delete', { character: '老闆娘', room: room, name: '筆記-2.txt' })
+  assert.equal(deleted.ok, true, deleted.error)
+  assert.equal(existsSync(join(attachShop, 'chats', '老闆娘', room, 'files', '筆記-2.txt')), false)
+  const after = await callRpc('file.list', { character: '老闆娘', room: room })
+  assert.equal(after.value.length, 3, '剩下的三份（txt ＋ png ＋ svg）還在')
+
+  // 9. 不存在的房間／空檔名要給可行動的錯誤
+  const noRoom = await callRpc('file.list', { character: '老闆娘', room: '不存在' })
+  assert.equal(noRoom.ok, false)
+  assert.match(String(noRoom.error), /找不到這間房/, '錯誤要可行動：' + noRoom.error)
+  const noName = await callRpc('file.write', Buffer.from('x'), { query: query('') })
+  assert.equal(noName.ok, false, '檔名不可以是空的')
+
+  await callRpc('tavern.remove', { id: tavernId })
+  rmSync(attachShop, { recursive: true, force: true })
+  console.log('11e. 附件 OK — 上傳／編號／列出／讀取／刪除／訊息帶 media 都通過')
+}
+
 /* --- 12. 跨半契約：瀏覽器半呼叫的每個 op 都必須存在於宿主半 ---------------- */
 {
   // 這一條是為了「＋ 新增角色」那個 bug：面板呼叫 `character.create`，
@@ -739,7 +889,7 @@ function pngCard(entries) {
   }
   assert.ok(called.size > 5, '應該掃到多個 op 呼叫（掃描邏輯要有效）')
   // 確認二進位那兩個真的有被掃到——不然這個檢查會靜靜地失去一半效力。
-  for (const binary of ['assets.write', 'character.import']) {
+  for (const binary of ['assets.write', 'character.import', 'file.write']) {
     assert.ok(called.has(binary), `掃描應該要涵蓋二進位 op：${binary}`)
   }
 

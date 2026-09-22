@@ -31,17 +31,140 @@ DSH 有能力但沒有角色扮演的前台。這個插件是把兩邊接起來�
 
 | | |
 |---|---|
-| 版本 | **2.6.9**（房間＝資料夾）。**還沒 commit**——這台沒有 git；GitHub `main` 上還是 2.5.0 |
+| 版本 | **2.6.42**（訊息附件：圖片／檔案）。**還沒 commit**——這台沒有 git；GitHub `main` 上還是 2.5.0 |
 | 測試 | `npm test` **九套全綠**（`verify` / `test-pngcard` / `test-worldbook` / `test-agent` / `test-preset` / `smoke` / `test-workspace` / `test-registry` / `test-client`）|
 | 架構 | **三個面全部實作完成**：宿主半、瀏覽器半、**Agent 面** |
 | 規範 | 12 條（R1–R13），**每一條都有測試釘住** |
 | 真聊天 | ✅ 打通了；逐字串流、寫回 `.jsonl`、思考列、換角色換卡都實測過 |
 | 安裝 | ✅ `link:` 指回工作區（改工作區＝改插件）。**Windows 這台** |
 | UI | **五個分區**：🏠 大廳／💬 包廂／🎭 卡司／📖 藏書／**⚙️ 設定**。對話頁**四個分頁**：💬 對話／🖼️ 插圖／**⚙️ 房間**／**📄 檔案** |
-| 儲存 | **一間房＝一個資料夾**（`chats/<角色>/<roomId>/{room.json,chat.jsonl,art/}`），身分是 `roomId`，改名不動路徑。設計：`docs/room-layout.md` |
+| 儲存 | **一間房＝一個資料夾**（`chats/<角色>/<roomId>/{room.json,chat.jsonl,art/,files/}`），身分是 `roomId`，改名不動路徑。設計：`docs/room-layout.md` |
 | 酒館 | 一間（使用者自己選的資料夾）|
+| ⚠️ 待辦 | **宿主半還沒重啟**（`file.write`／`file.list`／`file.delete` ＋ 附件路由 ＋ `extra.media`）——重啟之後附件才會**留在房間裡**、重新整理才畫得出來 |
+
+### 2.6.42 這一輪（附件：上傳檔案與圖片）
+
+使用者回報「沒法選擇模型和上傳檔案」。模型那一半 2.6.22–2.6.41 就做完了，**這一輪補附件**。
+完整說明在 `CHANGELOG.md` 的 2.6.42；這裡只留**接手的人一定要知道的事**：
+
+1. **兩條路，照 DSH 自己的 composer 分**（讀 `dsh-client-ui-conversation` 的 `sendSession`）：
+   圖片走 `{type:'image', mediaType, data, name}`（base64 inline，**只有這樣模型才看得到圖**）；
+   其他檔案先 `ctx.get('fileUpload').upload(sessionId, file, name, …)` 拿 `receiptId`，
+   prompt 放 `{type:'file', receiptId}`。**附件在前面、文字在後面**（DSH 的順序）。
+2. **房間裡再存一份**（`<room>/files/`）：DSH 那一份帶不走。訊息用 `extra.media` 指它
+   ——那是 **SillyTavern 的欄位**，所以重新整理之後還畫得出來。
+3. ⚠️ **這一輪量到兩個真的壞掉的地方（都已修、都有測試）**：
+   - **送出瞬間自己那則訊息會消失**：`setChatRunning()` bump `refreshChannel`，對話頁
+     訂閱了它並在裡面 `loadMessages()`，而磁碟還沒有剛送出的那一則 → 蓋掉；
+     連錯誤訊息也被 `loadMessages` 的成功分支清掉（症狀：「按了送出，什麼都沒發生」）。
+     修法：`chat.busy`／`chat.writing` 時不重讀。
+   - **附件 chip 在送出時不見**：`media` 只收有 URL 的，而 URL 要等存進房間才有。
+     改成「名字在就留著」，還沒存到時畫一顆**不能點**的 chip。
+4. ⚠️ **假 PNG 會被 sharp 拒絕**：測試用的圖一定要用**真編碼器**產生
+   （`canvas.toBlob('image/png')`）。隨手拼的 PNG 位元組 Chrome 解得開、sharp 回
+   `Unsupported or malformed image data.`——我為此白跑了一次。
+5. ⚠️ **`file.write` 是二進位 op，`args` 是 `undefined`**：身分參數只能從 **query string**
+   讀（跟 `assets.write` 同一條規矩）。第一版寫 `args?.character` → 「角色 id 不可為空」。
+
+**這一輪的驗收（真瀏覽器）**：📎 在輸入框左邊；夾帶一張圖＋一份 txt → 兩顆 chip
+（圖片是縮圖、檔案是 📄＋大小）；× 拿掉、再加回來；送出 → 模型回覆裡寫著
+「The user attached a file "筆記.txt" (12 bytes)」，另一輪看著 canvas 產生的圖回報
+「primarily red/crimson with a yellow/gold block in the upper-left corner」。
+
+**重啟 `dsh web` 之後要補驗的三件事**（重啟前只驗得到「送得出去」那一半）：
+
+1. 房間裡真的多一個 `chats/<角色>/<房間id>/files/<檔名>`，而且位元組一模一樣。
+2. `chat.jsonl` 的那一則多一個 `extra.media`（`[{type,url,name,bytes}]`）。
+3. **重新整理頁面**之後，訊息上的附件還在（圖片畫得出來、檔案那顆 chip 點得開）。
+
+> ⚠️ 重啟前後最容易誤判的一件事：附件送得出去、模型也看得到，**只有房間那一份存不下來**
+> （`file.write` 回 `unknown op`）。這時訊息上會有一顆**虛線框、不能點**的 chip
+> ——那是刻意的（`dsh-tv-fileChipFlat`），不是壞掉。
+
 
 **一句話**：**引擎、油門、車殼都有了，現在連「房間」都是真的資料夾了。**
+
+**2.6.41 這一輪（對話頁用量列 ＋ 輸入框一張卡 ＋ 權限文案）**：
+
+- ⚠️ **整份「本輪用量」也在訊息上**（使用者：「還有這些資訊你剛才放錯位置了」）：點訊息上那顆
+  「用量 … tok」展開**那一輪**的細節（合計／提供方 · 模型／快取命中／未快取輸入／快取讀取／
+  輸出（其中推理）／本輪用時和速度）。DSH 這一整組 locale key 都是 `message.` 開頭
+  （`message.turnUsage.*`、`message.ranFor`）——所以它們屬於**訊息**，不屬於輸入框那個面板。
+  面板只剩上下文／會話統計／Token 用量（累計）三份。
+- **提供方 / 模型跟著訊息存**：`chat.jsonl` 的 `extra.route`（`{provider, model}`），
+  來源是開場快照的 `request/context` 事件。**動到宿主半 → 要重啟**。
+- ⚠️ **「用量／用时」掛在訊息上，不是掛在面板上**（使用者貼了 DSH 那兩個元素說
+  「我是指這兩個位置」）：助理訊息氣泡**下面**那一行 `[資料庫] 用量 14.4K tok`、
+  `[時鐘] 用时 3分18秒`（DSH 的 `message.turnUsage.consumed`／`message.ranFor`）。
+  要活得過重新整理就得跟著訊息存：`chat.jsonl` 的 **`extra.usage`／`extra.ms`**
+  （SillyTavern 的 `extra` 是自由欄位，`reasoning` 已經住在那裡）。**這一項動到宿主半**
+  → 要重啟；舊訊息沒有那兩個欄位就**不畫**（不是畫 0）。
+- **點面板外面就收起**（使用者：「我應該點擊外面就會縮回去」）：一個 `mousedown` listener，
+  只在有面板開著時掛、收起或卸載一定拆掉；點在**面板／pill／環**上面不算外面（它們自己有
+  onClick，這裡再關一次會變成「開了又立刻關」）。頁面上驗過：點訊息區→收起、點面板內→不關。
+- **本輪用量多一列「提供方 / 模型」**（DSH 的 `message.turnUsage.model`）：值來自**開場快照的
+  `records`**——最後一則 `request/context` 帶著 `provider`／`model`（`.jsonl` 沒那個欄位）。
+- **「本輪用時」→「本輪用時和速度」**（DSH 叫 `本轮用时和速度`），加上本輪輸出速度＝
+  本輪輸出 token ÷ 本輪秒數。分母用**整輪牆上時間**（串流沒報解碼時間），所以比 DSH 略低——
+  註解裡寫明「寧可低估也不要假裝精確」。
+- ⚠️ **每一顆按鈕開自己那一份**（使用者：「顯示資料他會分多個按鈕分開顯示」）：
+  環→`上下文`、碼錶→`會話統計`（＋本輪用時）、資料庫→`Token 用量（累計）`（＋本輪用量）。
+  不是把四段通通塞進同一個面板 ✗。狀態是 `chat.usagePanel`（`''`／`'ctx'`／`'stats'`／
+  `'tokens'`）：點同一顆＝收起來、點別顆＝換過去。
+- ⚠️ **環與統計是兩件事**（使用者：「你自己是分開顯示的」）。DSH 的分法（讀它的 CSS 與
+  locale 得到的事實）：
+  - 上下文＝**圓環按鈕**（`.JObwrW_trigger`：28×28、`border-radius:999px`、`display:grid`），
+    在 composer 那一列的 `trailing` 裡、**緊貼送出鍵前面**；
+  - 統計＝**兩顆 pill**（`.bOPqQW_root`：碼錶「幾輪幾步 · tok/s」、資料庫「tok · 快取命中」），
+    在**卡片外面**、整排置中；
+  - 面板是一個對話框（`stats.dialog.title`＝会话统计、`stats.dialog.usageTitle`＝Token 用量…）。
+  我一開始把三顆擠成一排、還塞進卡片裡 ✗——那是錯的。現在卡片裡是 `◯ ＋ 送出鍵`，卡片外面
+  是那兩顆。
+- **送出鍵在右下角、34×34 圓形**（DSH 的 `.uV2eYG_primary`：`border-radius:999px`、往上箭頭、
+  `translateY(-2px)`）。檔案路徑在左邊；忙碌時同一顆變成「停下來」。送出鍵因此沒有文字
+  （名字在 `aria-label`）。
+- **面板四段照 DSH 那個對話框**（使用者把它整份貼過來）：會話統計（模型用時／工具呼叫用時／
+  首 token 平均 TTFT／輸出速度 TPS）／Token 用量（合計／快取命中／未快取輸入／快取讀取／
+  輸出）／本輪用量／本輪用時。每列「標籤靠左、數字靠右」；面板裡的數字是**精確值加千分位**
+  （它寫 `775,465 tok`）。**本輪**那兩段來自**串流裡的 `{type:'usage'}` chunk** ＋
+  送出到收到回覆的實際時間——只有跑過一輪才出現。
+- ⚠️ **面板要往上開**：輸入框貼在對話頁底部，往下長一定被裁掉（截圖才看到）。
+  DSH 那顆環的面板就是 `position:absolute;bottom:calc(100% + 8px)`。
+- **輸入框是一張卡**（使用者：「有一些欺騙性的 UI，例如假裝是在同一個對話框，現在所有
+  東西都是分開的」）：`.dsh-tv-chatInput` 改成**沒有邊框、有底色、有圓角**的卡（照 DSH 的
+  `.uV2eYG_card`：`border:0` ＋ 底色 ＋ 柔和陰影 ＋ 大圓角），textarea 在裡面**沒有自己那
+  一圈框**，按鈕列與檔案路徑在同一張卡裡。舊版是四件各自成單位的東西（textarea 一圈框／
+  按鈕一列／檔案一行／pill 一列）——那才是「看起來分開」的原因。
+- **用量 pill 在卡片裡面**（同一張卡的下緣、整排置中）：
+  `[環] 上下文 1.1K / 1.00M（0%） · 緩衝 998.9K`、`[碼錶] 1 輪 1 步 · 200 tok/s`、
+  `[資料庫] 1.2K tok · 快取命中 78%`。點任何一顆展開上面那個面板。
+  DSH 是把那排放在卡片下方靠寬度對齊「假裝」同一體，這裡直接放進同一張卡。
+- ⚠️ **度量是「讀原始碼抄的」，不是看 DOM 猜的**。這台機器上就有 DSH 自己的前端：
+  `dsh-client-ui-chat/lib/client.js` 的 `.bOPqQW_*`（那排統計）與
+  `dsh-client-ui-conversation/lib/client.js` 的 `.JObwrW_*`（那顆計量環）。
+  抄下來才知道：pill 其實是 **`button`**（`background:0 0;border:none;padding:1px 8px`）、
+  整排 **`justify-content:center`**、字級 **13px**、`·` 自己帶 6px、圖示是 16×16
+  `stroke-width:1.25`、環是 14×14 半徑 5.5 且 `stroke-dasharray = 佔用 × 2πr`。
+  → **能讀原始碼就不要猜**（第一版是猜的：「小字＋灰階」✗，被說不夠好看）。
+  `·` **只在同一組內**用，組與組之間只留空白，細節收進點開的面板（它那顆計量環也是）。
+  ⚠️ 「不要框」那一版被說不夠好看之後才去把 DSH 的 CSS 讀出來——pill **確實是 button**，
+  只是 `background:0 0;border:none`（見上一條的度量表）。
+- **數字從哪來**：session 串流的**開場快照**（`type: 'snapshot'` 那個 frame 自己帶著
+  `projections`＝`contextPressure`／`tokenUsage`／`contextBreakdown`／`sessionStats`）。
+  那是宿主算好、給瀏覽器讀的同一份值——酒館只是跟著讀，不會出現「同一份日誌的第二個答案」。
+- ⚠️ **中間走錯的一步**（別再走回去）：第一版叫宿主半算（`room.usage` ＋ `ctx.tokenMeter`
+  ＋ `ctx.sessions.get()`），上線後那一列**一直是空的**，因為 `ctx.sessions` 只看得到
+  「現在活著的」session——重啟後那個對話不在記憶體裡就永遠量不到。改成讀持久日誌來的
+  開場快照之後就好了，而且**純客戶端＝不必重啟**。那一版的宿主半已經收回來。
+- ⚠️ **兩個用實測換來的 API 細節**（照型別推會錯，而且都是無聲的）：
+  1. `service.follow(...)` **不可以送 `assistantStream: false`**（宿主回
+     `session/follow rejected "request"`，我們靜靜吞掉）；**不送**它才會來開場快照。
+  2. 快照的 `projections` 在 **frame 自己身上**，**不是** `frame.page.projections`。
+     測試原本照錯的假設寫 → **測試全綠、畫面全空**；現在測試釘真形狀。
+- **權限文案改成人話**：以前是「只讀——read、glob、grep」（那是實作，不是使用者要決定的
+  事），現在兩處（酒館層＋「⚙️ 房間」）都寫「它拿到什麼」。
+- 舊綁定的 `chat` 欄位放的是**顯示名稱**（新綁定才有 `room`）——比對時兩種都要試。
+- 測試：`test-client.mjs` **14h**（純函式投影轉換、綁定表比對、串流收尾、讀不到就留空）。
 
 **2.6.9 這一輪（純客戶端，重新整理頁面就生效、不必重啟）**：
 
@@ -110,13 +233,13 @@ DSH 有能力但沒有角色扮演的前台。這個插件是把兩邊接起來�
 
 > 上一個版本的最後一哩（上傳 2.5.0 到 GitHub、裝完確認版本標記）**都已經完成**，
 > 見 §11。所以現在唯一還沒動的是 §7.5 那張表（四分區）。
-
----
-
-## 3. 程式碼地圖
+>
+> ⚠️ 2026-09-22 打掃：這一節以前有**兩份一模一樣的「2.6.41 之後還沒做的兩件」**
+> （貼上的時候重複了）。那兩件**都做完了**——模型 chip 在 2.6.22–2.6.41、
+> 附件在 **2.6.42**（見 §2 與 `CHANGELOG.md`）。重複的那一份已刪掉。
 
 ```
-lib/index.js       宿主半（Node）。31 個 rpc op ＋ 兩條 HTTP 路由。
+lib/index.js       宿主半（Node）。51 個 rpc op ＋ **三條** HTTP 路由（rpc／插圖／附件）。
                    ⚠️ 在 dsh web 的啟動路徑上——壞了整個 DSH 開不起來。inject 只有 webServer
 lib/client.js      瀏覽器半。全部 UI。是手寫的 __ModuleLoader__ bundle，不是 ESM、沒有 JSX
 lib/agent.js       Agent 面（新）。只在 preset 裡跑。動態系統提示 ＋ 世界書 ＋ 工具遮罩
@@ -124,6 +247,7 @@ lib/worldbook.js   世界書的觸發邏輯（純函式，好測）
 lib/workspace.js   一個酒館資料夾的讀寫（結構、卡片、世界書、對話、插圖、session 對照表）
 lib/registry.js    酒館街的註冊表（~/.dsh/taverns.json）
 lib/assets.js      插圖（art/ 底下，一項一組圖 ＋ 主圖）
+lib/roomfiles.js   房間的**附件**（`<room>/files/`：訊息裡夾帶的圖片／檔案 ＋ 讀取路由）
 lib/pngcard.js     PNG 角色卡的 tEXt chunk 解析
 lib/write.js       原子寫入（暫存檔 → rename）
 lib/defaults.js    新建酒館的預設內容（老闆娘 ＋ 世界書）
