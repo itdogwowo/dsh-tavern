@@ -1325,11 +1325,11 @@ function spyRpc(seen, extra) {
    * 沒有那個欄位，做一個存得起來、送不出去的欄位比沒有它更糟——那條理由寫在
    * `lib/samplers.js` 的檔頭，而這裡是最容易被「順手補上」的地方。
    */
-  const { TavernSettingsPage } = exportsObject.__components
+  const { TavernSettingsPage, MapTavernActions } = exportsObject.__components
   const { __setRpc, __chat } = exportsObject
 
   // ② 先驗鏡射：兩邊的常數必須一致。
-  const { TEMPERATURE_RANGE, MAX_TOKENS_RANGE } = await import('./lib/samplers.js')
+  const { TEMPERATURE_RANGE, MAX_TOKENS_RANGE, STOP_LIMITS } = await import('./lib/samplers.js')
   const mirrored = exportsObject.__samplerRanges
   assert.ok(mirrored !== undefined, '客戶端要匯出它鏡射的那組範圍（測試出口）')
   assert.deepEqual(
@@ -1343,6 +1343,16 @@ function spyRpc(seen, extra) {
     '⚠️ 客戶端的 maxTokens 範圍要等於 lib/samplers.js 的',
   )
   assert.deepEqual(Object.keys(mirrored).sort(), ['maxTokens', 'temperature'], '只有這兩個')
+  // ③ `stop` 的界線是**另一組常數**（形狀也不同：count／length 而不是 min／max）。
+  //    分開匯出是刻意的——混在 `__samplerRanges` 裡就分不出「哪個是範圍、哪個是上限」，
+  //    而那正是這個鏡射最容易被改壞的地方。
+  const mirroredStop = exportsObject.__stopLimits
+  assert.ok(mirroredStop !== undefined, '客戶端要匯出它鏡射的 stop 界線（測試出口）')
+  assert.deepEqual(
+    mirroredStop,
+    { count: STOP_LIMITS.count, length: STOP_LIMITS.length },
+    '⚠️ 客戶端的 stop 界線要等於 lib/samplers.js 的 STOP_LIMITS（改一邊就會紅）',
+  )
 
   const seen = []
   __setRpc((op, args) => {
@@ -1358,7 +1368,12 @@ function spyRpc(seen, extra) {
     characters: [],
     summary: { name: 'tavern', counts: {}, files: [], layout: [] },
     // `temperature` 是數字、`maxTokens` 是 `null`——兩種都要畫對。
-    settings: { name: '測試酒館', temperature: 0.8, maxTokens: null },
+    // `stop` 是**第三種形狀**（清單）：它要畫成一行一個的 textarea，而 `null`
+    // 與 `[]` 都必須是**空的**（不是 "null"、也不是一顆逗號）。
+    // `stopEnabled` 預設**關**（那條是「既有對話行為不變」的實作方式）。
+    settings: { name: '測試酒館', temperature: 0.8, maxTokens: null, stop: ['使用者：', 'User:'] },
+    // 回覆格式（`render.json` 的那一份設定本身，不是外層信封）。
+    render: { mode: 'marked', markers: [{ tag: '台詞', kind: 'speech', who: '' }], choicesClickable: true },
   })
 
   reactImpl.resetHooks()
@@ -1379,11 +1394,137 @@ function spyRpc(seen, extra) {
   assert.equal(String(tempField.props.min), String(mirrored.temperature.min), '輸入框的 min 要一致')
   assert.equal(String(tempField.props.max), String(mirrored.temperature.max), '輸入框的 max 要一致')
 
-  // ③ 儲存：送出去的是**數字**，而且兩個一起送。
+  // ①b `stop` 那一格：清單要畫成**一行一個**的文字（textarea），不是逗號、不是 JSON。
+  const stopField = byLabel('停止序列')
+  assert.ok(stopField !== undefined, '⚙️ 設定要有「停止序列」這一格')
+  assert.equal(stopField.props.value, '使用者：\nUser:', '⚠️ 清單要一行一個地畫出來')
+
+  /**
+   * ①c 回覆格式那一格（`render.json`）：**這是這一輪的新東西**。
+   *
+   * ⚠️ 它以前完全不存在——酒館只有「解碼」（讀得懂結構化的一行），
+   * 沒有「指定」（告訴模型要那樣寫）。所以 `choices`／`data` 這些 kind
+   * 一次都沒有出現過。
+   */
+  const modeSelect = byLabel('回覆格式（存進這間酒館的 render.json）')
+  assert.ok(modeSelect !== undefined, '⚙️ 設定要有「回覆格式」那一格')
+  assert.equal(String(modeSelect.props.value), 'marked', '要顯示目前存的那個模式')
+  assert.deepEqual(
+    modeSelect.props.children.map((o) => String(o.props.value)),
+    ['plain', 'marked', 'structured'],
+    '⚠️ 三個模式，`plain` 在第一個（它是預設，也是「與以前一字不差」的那一個）',
+  )
+  // 選了就要送 `render.write`（整份寫入，所以要帶完整的四個欄位）。
+  modeSelect.props.onChange({ target: { value: 'structured' } })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const renderCall = seen.filter((one) => one.op === 'render.write').pop()
+  assert.ok(renderCall !== undefined, '選模式要送 render.write')
+  assert.equal(renderCall.args.patch.mode, 'structured', '送出去的是新模式')
+  assert.equal(renderCall.args.patch.choicesClickable, true, '⚠️ 整份寫入 ⇒ 沒改的欄位也要帶著（不然會被清掉）')
+  assert.deepEqual(
+    renderCall.args.patch.markers,
+    [{ tag: '台詞', kind: 'speech', who: '' }],
+    '⚠️ 標記也要帶著（整份寫入的另一半）',
+  )
+
+  // ①d 「選項可以點」那一顆開關。
+  const choiceToggle = byLabel('讓「選項」可以點（點了填進輸入框，不會直接送出）')
+  assert.ok(choiceToggle !== undefined, '要有「選項可以點」那一顆開關')
+  assert.equal(choiceToggle.props.checked, true, '要顯示目前的值（這一份設定是 true）')
+
+  // ①e stop 的開關：**一顆 checkbox**，而且預設是關的（沒設定 ⇒ 關）。
+  const stopToggle = byLabel('擋住它替你說話（送出內建的停止序列）')
+  assert.ok(stopToggle !== undefined, '要有 stop 的開關')
+  assert.equal(stopToggle.props.checked, false, '⚠️ 沒設定 ⇒ 關（既有對話的行為不變）')
+  // ⚠️ 開關走的是**這一頁的 `props.commit`**（`loadTavernData` 的 `commit`），
+  //    不是直接 `rpc`——它會先把值寫進本地 state（那是畫面立刻反應的來源），
+  //    再送 `settings.write`。所以這裡驗的是**送給 commit 的那個值**。
+  //    `commit` 住在 `MapTavernActions` 裡，所以要從那一棵樹找（不是整個分區）。
+  const committed = []
+  reactImpl.resetHooks()
+  const actionsTree = renderComponent(MapTavernActions, {
+    tavern: { id: 'tv-1', name: '測試酒館' },
+    settings: { stopEnabled: false },
+    render: { mode: 'plain' },
+    commit: (patch) => committed.push(patch),
+    reload: () => {},
+  })
+  const toggleInActions = collect(
+    actionsTree,
+    (el) => el.props['aria-label'] === '擋住它替你說話（送出內建的停止序列）',
+  )[0]
+  assert.ok(toggleInActions !== undefined, '那一顆開關要在酒館設定那一區裡')
+  toggleInActions.props.onChange({ target: { checked: true } })
+  assert.deepEqual(
+    committed.pop(),
+    { stopEnabled: true },
+    '⚠️ 開關送的是 `{ stopEnabled: true }`（布林）——不是字串、也不是把整份設定送出去',
+  )
+
+  // 鏡射：內建那四串要與宿主一字不差（畫面列的字＝真的會送出去的字）。
+  const { STOP_PRESET: HOST_PRESET } = await import('./lib/samplers.js')
+  assert.deepEqual(
+    exportsObject.__stopPreset,
+    HOST_PRESET,
+    '⚠️ 畫面列的內建停止序列要等於 lib/samplers.js 的 STOP_PRESET（改一邊就會紅）',
+  )
+
+  /**
+   * ①f 「一個東西兩個來源」的警告（2.6.58）。
+   *
+   * ⚠️ **它必須只在真的會衝突時說話。** 世界書在教格式 **而且** plugin 也在送
+   * 指令（＝模式不是 `plain`）才有兩份規格；`plain` 模式下 plugin 一個字都不加，
+   * 世界書就是唯一的老師——**那是完全可以的**。
+   *
+   * 一個永遠說話的警告等於沒有警告，所以「什麼時候**不**說話」才是這一條的重點。
+   */
+  const warnIn = (props) => {
+    reactImpl.resetHooks()
+    const tree = renderComponent(MapTavernActions, props)
+    return collect(tree, (el) => String(el.props.className || '') === 'dsh-tv-warn').length
+  }
+  const baseProps = {
+    tavern: { id: 'tv-1', name: '測試酒館' },
+    settings: {},
+    commit: () => {},
+    reload: () => {},
+  }
+  const book = [{ id: '輸出格式', entries: ['輸出格式（酒館模式）'] }]
+
+  assert.equal(
+    warnIn({ ...baseProps, formatBooks: book, render: { mode: 'structured' } }),
+    1,
+    '⚠️ 世界書在教格式 ＋ 模式不是 plain ⇒ **要**說話（兩份規格）',
+  )
+  assert.equal(
+    warnIn({ ...baseProps, formatBooks: book, render: { mode: 'marked' } }),
+    1,
+    'marked 也一樣是「plugin 在送指令」',
+  )
+  assert.equal(
+    warnIn({ ...baseProps, formatBooks: book, render: { mode: 'plain' } }),
+    0,
+    '⚠️ plain ⇒ plugin 沒送指令 ⇒ 世界書是唯一的老師，**不要**說話',
+  )
+  assert.equal(
+    warnIn({ ...baseProps, formatBooks: [], render: { mode: 'structured' } }),
+    0,
+    '沒有世界書在教格式 ⇒ 只有一個來源，不用說話',
+  )
+  assert.equal(
+    warnIn({ ...baseProps, render: { mode: 'structured' } }),
+    0,
+    '⚠️ `formatBooks` 不存在（舊宿主沒回這個欄位）時不可以丟錯，也不要說話',
+  )
+
+  // ③ 儲存：送出去的是**數字**（與一整段文字），而且三個一起送。
   byLabel('溫度').props.onChange({ target: { value: '1.2' } })
   const tree2 = renderComponent(TavernSettingsPage, {})
   collect(tree2, (el) => el.props !== undefined && el.props['aria-label'] === '最多回幾個 token')[0].props.onChange(
     { target: { value: '512' } },
+  )
+  collect(renderComponent(TavernSettingsPage, {}), (el) => el.props !== undefined && el.props['aria-label'] === '停止序列')[0].props.onChange(
+    { target: { value: '作者：\n\nAssistant:' } },
   )
   const save = collect(
     renderComponent(TavernSettingsPage, {}),
@@ -1392,7 +1533,11 @@ function spyRpc(seen, extra) {
   assert.ok(save !== undefined, '生成參數要有自己的儲存鈕')
   save.props.onClick()
   const call = seen.filter((one) => one.op === 'settings.write').pop()
-  assert.deepEqual(call.args.patch, { temperature: 1.2, maxTokens: 512 }, '兩個都要送，而且是數字')
+  assert.deepEqual(
+    call.args.patch,
+    { temperature: 1.2, maxTokens: 512, stop: '作者：\n\nAssistant:' },
+    '兩個數字要是數字；⚠️ stop 送的是**一整段文字**，拆行是宿主半的事（客戶端不自己拆）',
+  )
 
   // ④ 清空 ⇒ 送 `null`（＝沒有設定／聽上一層），**不是**送空字串、也不是送 0。
   //    送 0 會變成「溫度 0」，那是一個完全不同的意思（最保守的取樣）。
@@ -1405,14 +1550,17 @@ function spyRpc(seen, extra) {
   collect(renderComponent(TavernSettingsPage, {}), (el) => el.props !== undefined && el.props['aria-label'] === '最多回幾個 token')[0].props.onChange(
     { target: { value: '' } },
   )
+  collect(renderComponent(TavernSettingsPage, {}), (el) => el.props !== undefined && el.props['aria-label'] === '停止序列')[0].props.onChange(
+    { target: { value: '' } },
+  )
   collect(
     renderComponent(TavernSettingsPage, {}),
     (el) => el.type === 'button' && el.props.children === '儲存生成參數',
   )[0].props.onClick()
   assert.deepEqual(
     seen.filter((one) => one.op === 'settings.write').pop().args.patch,
-    { temperature: null, maxTokens: null },
-    '清空要送 null（＝讓 DSH 決定），不是 0',
+    { temperature: null, maxTokens: null, stop: null },
+    '清空要送 null（＝讓 DSH 決定），不是 0、也不是空陣列或空字串',
   )
 
   // ⑤ ⚠️ 宿主半說「這個值沒存下來」時，畫面上要說出來。
@@ -1467,7 +1615,712 @@ function spyRpc(seen, extra) {
   for (const key of ['taverns', 'activeId', 'characters', 'summary', 'settings']) {
     delete exportsObject.__testSeed[key]
   }
-  console.log('4m. 生成參數 UI OK — 兩個欄位、null ⇒ 空字串、清空送 null、dropped 會顯示、範圍與宿主一致')
+  console.log('4m. 生成參數 UI OK — 三個欄位、null ⇒ 空字串、stop 一行一個且原樣送、清空送 null、範圍與宿主一致')
+}
+
+/* --------- ⚙️ 房間 那一層的停止序列（2.6.56）--------- */
+
+{
+  /**
+   * 為什麼這一節要獨立：**房間那一層的生成參數從來沒有測試過。**
+   *
+   * 4m 驗的是 ⚙️ 設定（酒館層）。房間那一格住在對話頁的「⚙️ 房間」分頁裡，
+   * 走的是 `room.write` 與**清單投影**（`selected.stop`）——兩條完全不同的路。
+   * 而「酒館層會過」從來不能推論「房間層也會過」：這一輪加的 `stop` 就是
+   * 三個欄位裡唯一一個**形狀不同**的（清單），任何一端漏了它都是安靜的
+   * ——畫面看起來正常，只是那個值永遠是空的。
+   *
+   * ⚠️ 而這一節最貴的一條是第 ④ 個：`selected` 是 `room.list` 的**投影**，
+   * 所以「清單有沒有帶 stop」與「存不存得進去」是**兩件事**。
+   * `temperature` 就是漏了投影才壞過一次（存了但格子是空的）。
+   */
+  const { __setRpc, __selectChat, __setChatTab } = exportsObject
+  const { TavernChatPage: ChatPage } = exportsObject.__components
+
+  const seen = []
+  __setRpc((op, args) => {
+    seen.push({ op, args })
+    if (op === 'room.write') return Promise.resolve(Object.assign({}, args.patch))
+    return Promise.resolve({})
+  })
+
+  const room = {
+    character: '老闆娘',
+    room: 'm1k3x9-a7f2',
+    name: '夜晚',
+    file: 'm1k3x9-a7f2/chat.jsonl',
+    roomPrompt: '',
+    allowTools: 'inherit',
+    // 房間自己的值（`null` ＝ 聽酒館的）。
+    temperature: 1.4,
+    maxTokens: null,
+    stop: ['房間的', '第二個'],
+  }
+  const fieldIn = (tree, label) => collect(tree, (el) => el.props['aria-label'] === label)[0]
+  const renderRoomTab = () => {
+    __setChatTab('room')
+    return renderComponent(ChatPage, {})
+  }
+  const saveBtn = (tree) =>
+    collect(tree, (el) => el.type === 'button' && flatten(el).includes('儲存這一間房的生成參數'))[0]
+
+  __selectChat(room)
+  reactImpl.resetHooks()
+  // ⚠️ 重繪**不可以** `resetHooks()`（理由同 4k／14f）：這一頁的狀態住在 `useRef` 裡。
+  let pane = renderRoomTab()
+
+  // ① 三個欄位都在，而且房間自己的值顯示得出來。
+  const tempField = fieldIn(pane, '這一間房的溫度')
+  assert.ok(tempField !== undefined, '「⚙️ 房間」要有溫度欄位')
+  assert.equal(tempField.props.value, '1.4', '要顯示房間自己的值')
+  const stopField = fieldIn(pane, '這一間房的停止序列')
+  assert.ok(stopField !== undefined, '「⚙️ 房間」要有停止序列欄位')
+  assert.equal(stopField.props.value, '房間的\n第二個', '⚠️ 房間的清單要一行一個地畫出來')
+
+  // ② 房間沒設的那幾欄 ⇒ 空字串（＝聽酒館的），畫面上就是空的。
+  assert.equal(fieldIn(pane, '這一間房的最多 token').props.value, '', '`null` ⇒ 空字串（不是 "null"）')
+
+  // ③ 儲存：stop 送**一整段文字**，身分用房間 id。
+  stopField.props.onChange({ target: { value: ' 作者： \n\nAssistant: ' } })
+  saveBtn(renderRoomTab()).props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const call = seen.filter((one) => one.op === 'room.write').pop()
+  assert.equal(call.args.room, 'm1k3x9-a7f2', '要用**房間 id**送（名字不是身分）')
+  // ⚠️ 送的是**一整段文字**，而它只被 trim 了**整塊的頭尾**——每一行自己的空白
+  // （`'作者： '` 尾巴那個空格）原樣留著。那不是我漏了：**每一行的 trim、去空行、
+  // 去重全部是宿主半 `normalizeStop()` 的事**，客戶端只負責「空的＝清除」這一格。
+  assert.equal(
+    call.args.patch.stop,
+    '作者： \n\nAssistant:',
+    '⚠️ stop 原樣送出去（只有整塊頭尾被 trim）：拆行、逐行 trim、去空行都是宿主半的事',
+  )
+  assert.equal(call.args.patch.temperature, 1.4, '同一次儲存裡其他欄位也要送')
+  assert.equal(call.args.patch.maxTokens, null, '房間沒設的那一欄送 null（＝聽酒館的）')
+
+  // ③b 清空 ⇒ `null`（＝聽酒館的），**不是**空字串、也不是空陣列。
+  //     這一格與酒館層同一條規矩：空字串送出去會在房間層留下一份「空的」，
+  //     而它的意思是「把酒館那一組清掉」——那不是使用者按清除時要的事。
+  collect(renderRoomTab(), (el) => el.props['aria-label'] === '這一間房的停止序列')[0].props.onChange({
+    target: { value: '   \n  ' },
+  })
+  saveBtn(renderRoomTab()).props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(
+    seen.filter((one) => one.op === 'room.write').pop().args.patch.stop,
+    null,
+    '清空（只有空白也算）要送 null ＝ 聽酒館的',
+  )
+
+  // ④ ⚠️ 清單投影：`selected` 是 `room.list` 回來的，所以它必須帶 `stop`
+  //    ——不然「存了但格子是空的」（`temperature` 就是這樣壞過一次）。
+  //    這一條用**原始碼**驗，因為清單是非同步載入的，假 React 的 `useEffect` 不會跑
+  //    （跟 §7.6 的「刪除確認列」同一個限制）。
+  assert.ok(
+    codeSource.includes('stopToText(selected.stop)'),
+    '⚠️ 「⚙️ 房間」那一格要從**清單投影**（`selected.stop`）取值，' +
+      '不是另外打一次 `room.read`——投影漏了欄位是安靜的錯（畫面正常、格子永遠空的）',
+  )
+
+  /**
+   * ⑤ 開關那一格：**三態的下拉選單**，不是 checkbox。
+   *
+   * ⚠️ 這一條的形狀本身就是規格：`false`（關）與 `null`（聽酒館的）是
+   * **不同的兩件事**，用一顆 checkbox 表達不出來。而這兩者混掉的症狀是
+   * 「我明明把這一間房關掉了，它還是在送」。
+   */
+  const stopSelect = (tree) => collect(tree, (el) => el.props['aria-label'] === '這一間房的「擋住它替你說話」')[0]
+  const first = stopSelect(renderRoomTab())
+  assert.ok(first !== undefined, '「⚙️ 房間」要有開關那一格（三態的下拉選單）')
+  const stopOptions = first.props.children.map((o) => String(o.props.value))
+  assert.deepEqual(stopOptions, ['inherit', 'on', 'off'], '⚠️ 三態：聽酒館的／開／關（缺一不可）')
+
+  // 三個狀態各自對應到「送出去的值」——`inherit` 送 `null`（＝清除），其餘送布林。
+  // ⚠️ `false` 不可以被當成 falsy 而落回「沒送」：那正是這一條存在的理由。
+  const stopStates = []
+  for (const roomStopEnabled of [true, false, null]) {
+    seen.length = 0
+    __selectChat(Object.assign({}, room, { stopEnabled: roomStopEnabled }))
+    reactImpl.resetHooks()
+    const select = stopSelect(renderRoomTab())
+    const wanted = roomStopEnabled === true ? 'on' : roomStopEnabled === false ? 'off' : 'inherit'
+    assert.equal(
+      String(select.props.value),
+      wanted,
+      `room.json 的 stopEnabled=${JSON.stringify(roomStopEnabled)} 要顯示成 ${wanted}`,
+    )
+    // `MapSelect` 的 onChange 收的是**事件**（它自己讀 `event.target.value`）。
+    select.props.onChange({ target: { value: wanted === 'inherit' ? 'on' : 'inherit' } })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    stopStates.push(seen.filter((one) => one.op === 'room.write').pop().args.patch.stopEnabled)
+  }
+  assert.deepEqual(
+    stopStates,
+    [null, null, true],
+    '⚠️ 「聽酒館的」要送 null（清除）、「開」要送 true——`false` 不可以被當成「沒送」',
+  )
+  // 而「off」那一格真的會送出 `false`（不是 null）。
+  seen.length = 0
+  stopSelect(renderRoomTab()).props.onChange({ target: { value: 'off' } })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(
+    seen.filter((one) => one.op === 'room.write').pop().args.patch.stopEnabled,
+    false,
+    '⚠️ 選「關」要送 false（那是一個明確的決定，不是「沒設」）',
+  )
+
+  __setChatTab('chat')
+  console.log('4r. 房間的停止序列 OK — 從清單投影顯示、原樣送、開關是三態（false 不會被當成沒送）')
+}
+
+/* --------- 回覆格式：解析設定、choices、rows、進度條（2.6.57）--------- */
+
+{
+  /**
+   * 這一節釘住**「指定」那一半在客戶端的接線**，以及三個新的繪製路徑。
+   *
+   * ⚠️ 為什麼要有這一節：`lib/render.js` 的純函式在 `test-render.mjs` 全綠，
+   * **但那不代表畫面會用它們**。這一節驗的正是那個接點——
+   * `parseConfigFromRender` 有沒有被呼叫、`choices` 有沒有畫成按鈕、
+   * `rows` 的進度條有沒有出現。少任何一條都是**安靜的**（畫面照樣畫得出來）。
+   */
+  const r = exportsObject.__render
+  assert.ok(r !== undefined, '要匯出 __render（測試出口）')
+  assert.equal(typeof r.parseConfigFromRender, 'function', '要有 parseConfigFromRender')
+  assert.equal(typeof r.progressOf, 'function', '要有 progressOf')
+  assert.equal(typeof r.parseChoices, 'function', '要有 parseChoices')
+
+  // ① 鏡射：三個模式要與 `lib/render.js` 一字不差。
+  const { RENDER_MODES: HOST_MODES, progressOf: hostProgress, parseChoices: hostChoices } = await import('./lib/render.js')
+  assert.deepEqual(r.modes, HOST_MODES, '⚠️ 客戶端的模式清單要等於 lib/render.js 的（改一邊就會紅）')
+  assert.equal(r.modes[0], 'plain', '⚠️ plain 要在第一個（它是預設，也是「與以前一字不差」的那一個）')
+
+  // ② 鏡射：`progressOf` 的行為要一樣（同一組輸入、同一組輸出）。
+  for (const value of ['62%', '62 ％', '3/10', '3／10', '150%', '-20%', '62', '晚上 11:30', '很好', '', '7/0']) {
+    assert.deepEqual(
+      r.progressOf(value),
+      hostProgress(value),
+      `⚠️ progressOf(「${value}」) 兩邊要一樣（它是鏡射，走散就會「面板說有、畫面沒畫」）`,
+    )
+  }
+  // ③ 鏡射：`parseChoices`。
+  for (const value of ['A\nB', '- A\n1. B', 'A，B', 'A\n\nA', '', '- ', null]) {
+    assert.deepEqual(r.parseChoices(value), hostChoices(value), `⚠️ parseChoices(「${String(value)}」) 兩邊要一樣`)
+  }
+
+  // ④ ⚠️ **只有 marked 模式才把標記交給解析器**——這一條是這一節最重要的斷言。
+  const markers = [{ tag: '台詞', kind: 'speech', who: '' }]
+  assert.deepEqual(r.parseConfigFromRender({ mode: 'marked', markers }).markers, markers, 'marked ⇒ 有標記')
+  assert.deepEqual(r.parseConfigFromRender({ mode: 'plain', markers }).markers, [], 'plain ⇒ 沒有標記')
+  assert.deepEqual(
+    r.parseConfigFromRender({ mode: 'structured', markers }).markers,
+    [],
+    '⚠️ structured ⇒ 沒有標記（模型吐了 `<台詞>` 代表它走樣了，我們要看見那些角括號）',
+  )
+  // 壞輸入不可以丟錯（同 §7.4b 的型別教訓）。
+  for (const junk of [null, undefined, 'x', 7]) {
+    const cfg = r.parseConfigFromRender(junk, '甲')
+    assert.deepEqual(cfg.markers, [], `${JSON.stringify(junk)} 不可以丟錯`)
+    assert.equal(cfg.defaultWho, '甲', 'defaultWho 要傳下去')
+  }
+
+  console.log('4s. 回覆格式的鏡射 OK — 三個模式、progressOf／parseChoices 兩邊一致、只有 marked 給標記')
+}
+
+/* --------- 訊息的節點樹 → 畫面：rows／choices／進度條（2.6.57）--------- */
+
+{
+  /**
+   * ⚠️ 這一節驗**畫面那一端**（`renderMessage`），而不是解析那一端。
+   * 兩者分開是 `docs/reply-format.md` 的核心規矩之一（I3：解析只發生在渲染期），
+   * 所以「解析對了但畫不出來」是一種真的會發生的失敗
+   * ——而且它是**安靜的**：畫面照樣有字，只是形狀不對。
+   *
+   * 直接呼叫 `renderMessage` 而不是渲染整個對話頁：這一支的輸入輸出都是純資料
+   * （節點樹 → React 元素），所以不必把非同步的訊息載入拉進來當前置條件。
+   */
+  const { renderMessage } = exportsObject.__render
+  assert.equal(typeof renderMessage, 'function', '要匯出 renderMessage（測試出口）')
+
+  const structured = [
+    '{"kind":"speech","who":"老闆娘","text":"你終於來了。"}',
+    '{"kind":"data","rows":[{"key":"好感度","value":"62%"},{"key":"時間","value":"晚上 11:30"}]}',
+    '{"kind":"choices","items":["去酒窖，順便拿燈","留下來"]}',
+  ].join('\n')
+  const cfg = exportsObject.__render.parseConfigFromRender({ mode: 'structured', choicesClickable: false })
+
+  const tree = { type: 'div', props: { children: renderMessage(structured, '老闆娘', cfg) } }
+  const text = flatten(tree)
+
+  // ① 台詞畫出來了，而且**JSON 的鍵沒有露出來**。
+  //    （把 `"kind"` 當成台詞畫出來是 §1 記過一次的走樣形狀。）
+  assert.ok(text.includes('你終於來了。'), 'speech 的內容要畫出來：' + text.slice(0, 200))
+  // ⚠️ 比對要**精準**：`includes('kind')` 會被「去酒**窖**…」那種中文字串以外的东西誤命中，
+  //    而這裡真正要禁的是**帶引號的鍵**（那是 JSON 語法漏出來的形狀）。
+  assert.equal(text.includes('"kind"'), false, '⚠️ JSON 的鍵（帶引號）不可以露在畫面上：' + text.slice(0, 200))
+  assert.equal(text.includes('{'), false, '⚠️ 大括號也不該露出來（壞掉的 JSON 會被降級成一個旁白節點）')
+
+  // ② `rows`：**只有帶單位的數字**有進度條。
+  // ⚠️ 比對要用**完整 class 名**：`dsh-tv-dataBarFill` 也含 `dsh-tv-dataBar`
+  //    這一段字，用 `includes` 會把它算成第二條進度條（實測踩到）。
+  const bars = collect(tree, (el) => el.props.className === 'dsh-tv-dataBar')
+  assert.equal(bars.length, 1, `⚠️ 只有帶單位的數字才畫進度條（實得 ${bars.length} 條）`)
+  assert.equal(
+    bars[0].props.children.props.style.width,
+    '62%',
+    '進度條的寬度要是那個百分比（不是猜出來的）',
+  )
+  assert.ok(text.includes('好感度') && text.includes('時間'), '兩列的 key 都要畫出來')
+  assert.ok(text.includes('晚上 11:30'), '沒有單位的值原樣畫成文字')
+
+  // ③ `choices`：`choicesClickable` 是 false ⇒ **畫成純文字，不是按鈕**。
+  //    畫成按鈕卻沒反應是欺騙性的 UI（`design-language.md` 明講過）。
+  const flatButtons = collect(tree, (el) => el.type === 'button' && String(el.props.className || '').includes('dsh-tv-choice'))
+  assert.equal(flatButtons.length, 0, '⚠️ 沒開「可點」時不可以畫成按鈕')
+  assert.ok(text.includes('去酒窖，順便拿燈'), '⚠️ 選項要看得見（只是不能點）')
+  assert.ok(text.includes('留下來'), '而且第二個選項也要在')
+
+  // ④ 開了「可點」⇒ 真的變成按鈕，而且**點下去只填進輸入框**（不送出）。
+  const clickCfg = exportsObject.__render.parseConfigFromRender({ mode: 'structured', choicesClickable: true })
+  const clickTree = { type: 'div', props: { children: renderMessage(structured, '老闆娘', clickCfg) } }
+  const buttons = collect(clickTree, (el) => el.type === 'button' && String(el.props.className || '').includes('dsh-tv-choice'))
+  assert.equal(buttons.length, 2, '開了「可點」⇒ 每個選項一顆按鈕')
+  assert.equal(buttons[0].props.children, '去酒窖，順便拿燈', '按鈕上的字就是選項本身')
+  // ⚠️ 那個 handler 是 `fillChatDraft`，它只碰 DOM（找 `aria-label="訊息"` 那一格）。
+  //    這裡釘住**它不會丟錯**（假的 document 沒有那一格）——那是最低限度的保證，
+  //    而「真的填進去」要在真瀏覽器裡驗（`docs/plan.md` 的驗收清單）。
+  assert.doesNotThrow(() => buttons[0].props.onClick(), '⚠️ 找不到輸入框時不可以丟錯（那是繪製路徑）')
+
+  /**
+   * ⑤ ⚠️ **`data`／`choices` 的「舊」寫法：內容在 `text` 裡，用轉義的 `\n` 分行。**
+   *
+   * 這一條是被**使用者自己的世界書**逼出來的——他的 `輸出格式.json` 教的是
+   *
+   *     {"kind":"data","text":"時間：晚上十一點\n心情：疲倦"}
+   *
+   * 而 JSON 裡的 `\n` 解析之後是**兩個字元**（反斜線 ＋ n），不是一個換行。
+   * 所以兩件事都要對：
+   *   - `parseDataRows()` 要**同時認真的換行與字面上的 `\n`**
+   *     （不然整串是一行 ⇒ 找不到合法的 `key: value` ⇒ 降級成旁白）
+   *   - `parseStructuredLine()` 要**先試 `rows`／`items`、再試 `text`**
+   *     （第一版只認 `rows`／`items`，於是他世界書教的寫法一律 `missing-rows`）
+   *
+   * 症狀是**安靜的**：畫面上是一行夾著看得見的 `\n` 的文字，而不是一張表。
+   * 這一條釘住那兩件事，因為它們都不會丟錯、也不會自己變紅。
+   */
+  const ESCAPED_NL = String.raw`\n`
+  const legacyData = '{"kind":"data","text":"時間：晚上十一點' + ESCAPED_NL + '心情：疲倦"}'
+  const legacyChoices = '{"kind":"choices","text":"去酒窖' + ESCAPED_NL + '留下來"}'
+  const legacyTree = { type: 'div', props: { children: renderMessage(legacyData + '\n' + legacyChoices, '老闆娘', cfg) } }
+  const legacyRows = collect(legacyTree, (el) => el.props.className === 'dsh-tv-dataRow')
+  assert.equal(legacyRows.length, 2, `⚠️ 舊寫法的 data 要拆成兩列（實得 ${legacyRows.length}）`)
+  const legacyKeys = collect(legacyTree, (el) => el.props.className === 'dsh-tv-dataKey').map((el) => el.props.children)
+  assert.deepEqual(legacyKeys, ['時間', '心情'], '⚠️ 兩個 key 都要拆出來（字面上的 \\n 也是行分隔）')
+  assert.equal(
+    flatten(legacyTree).includes(ESCAPED_NL),
+    false,
+    '⚠️ 不可以把轉義的 \\n 原樣畫在畫面上',
+  )
+  // `choices` 的舊寫法也一樣要拆開（不然兩個選項會黏成一個）。
+  // ⚠️ 比對**完整 class 名**：`startsWith('dsh-tv-choice')` 也會命中
+  //    `dsh-tv-choiceFlat`（那正是這一輪要看的東西），於是數出 3 個。
+  const legacyItems = collect(legacyTree, (el) => el.props.className === 'dsh-tv-choiceFlat')
+  assert.equal(legacyItems.length, 2, `⚠️ 舊寫法的 choices 要拆成兩個選項（實得 ${legacyItems.length}）`)
+
+  // ⑤b 而且它**不可以被當成壞資料**（`problems` 要是空的）。
+  const problems = exportsObject.__display.parse(legacyData, cfg).problems
+  assert.deepEqual(
+    problems.map((one) => one.kind),
+    [],
+    '⚠️ 世界書教的寫法是**合法**的，不該回報成壞資料：' + JSON.stringify(problems),
+  )
+
+  console.log('4t. 訊息繪製 OK — 進度條只在帶單位時出現、choices 兩態、**世界書的舊寫法也吃得下**')
+}
+
+/* --------- 世界書的注入位置（2.6.59）--------- */
+
+{
+  /**
+   * ⚠️ 這一節有兩件事，而**第二件才是容易壞的**：
+   *
+   * 1. 位置清單與人話說明是 `lib/worldbook.js` 的**鏡射**（客戶端 bundle 沒有
+   *    ESM import）——兩邊走散就會出現「畫面寫角色卡後面、實際放到尾巴」。
+   * 2. 「放在哪裡」那一格顯示的是**檔案裡的原始值**，不是算完的結果：
+   *    沒指定時要顯示空字串（＝跟著酒館預設），而不是顯示那個預設值。
+   *    顯示算完的值會讓使用者以為自己被改過了。
+   */
+  const { MapWorldbooks } = exportsObject.__components
+  const { WORLDBOOK_POSITIONS: HOST_POSITIONS, WORLDBOOK_POSITION_INFO: HOST_INFO } = await import('./lib/worldbook.js')
+
+  assert.deepEqual(
+    exportsObject.__worldbookPositions,
+    HOST_POSITIONS,
+    '⚠️ 客戶端的位置清單要等於 lib/worldbook.js 的（改一邊就會紅）',
+  )
+  /**
+   * ⚠️ **兩邊的 `label` 現在故意不一樣**，而那不是走散：
+   *   - 宿主那份（`WORLDBOOK_POSITION_INFO`）是**給訊息用的**人話
+   *     （「已把這一本書放到「角色卡後面（系統提示）」」）
+   *   - 客戶端那份是**選項清單用的短名字**（「系統提示・後」）——
+   *     使用者回報過「選項塞一長串解釋」很難用，所以短名字與解釋分開了
+   *
+   * 所以契約是「**同一組位置、每一項都有名字與解釋**」，不是「同一串字」。
+   */
+  for (const one of HOST_POSITIONS) {
+    assert.equal(typeof HOST_INFO[one].label, 'string', `宿主要有 ${one} 的標籤`)
+    assert.equal(typeof HOST_INFO[one].hint, 'string', `宿主要有 ${one} 的說明`)
+    const mine = exportsObject.__worldbookPositionInfo[one]
+    assert.equal(typeof mine.label, 'string', `客戶端要有 ${one} 的短名字`)
+    assert.equal(typeof mine.hint, 'string', `客戶端要有 ${one} 的解釋`)
+    assert.ok(
+      mine.label.length <= 10,
+      `⚠️ 選項的短名字要短（${one} 是「${mine.label}」，${mine.label.length} 字）——` +
+        '解釋要放 `hint`，那是使用者回報過的（「一大段一大段的」）',
+    )
+  }
+
+  const { __setRpc } = exportsObject
+  const seen = []
+  __setRpc((op, args) => {
+    seen.push({ op, args })
+    if (op === 'worldbook.list') {
+      return Promise.resolve([{ id: '輸出格式', file: '輸出格式.json', assets: null }])
+    }
+    if (op === 'worldbook.positions') {
+      return Promise.resolve({
+        fallback: 'system-before',
+        books: [{ id: '輸出格式', position: 'system-after', explicit: true }],
+      })
+    }
+    if (op === 'worldbook.read') return Promise.resolve({ name: '輸出格式', entries: {} })
+    return Promise.resolve({})
+  })
+
+  reactImpl.resetHooks()
+  const tree = renderComponent(MapWorldbooks, {
+    settings: { worldbookPosition: 'system-before' },
+    commit: () => {},
+  })
+
+  // ① 酒館層那一格顯示現在的值。
+  const fallbackSelect = collect(tree, (el) => el.props['aria-label'] === '這裡的世界書預設放在哪')[0]
+  assert.ok(fallbackSelect !== undefined, '📖 藏書 要有一格「這裡的世界書預設放在哪」')
+  assert.equal(String(fallbackSelect.props.value), 'system-before', '要顯示現在的值')
+  assert.deepEqual(
+    fallbackSelect.props.children.map((o) => String(o.props.value)),
+    ['', 'system-before', 'system-after', 'in-chat'],
+    '⚠️ 第一個選項是空字串（＝接在最新訊息前面，與以前一樣）',
+  )
+
+  // ② 選了就要送 `settings.write`（那一格寫的是 tavern.json）。
+  const committed = []
+  reactImpl.resetHooks()
+  collect(
+    renderComponent(MapWorldbooks, { settings: {}, commit: (patch) => committed.push(patch) }),
+    (el) => el.props['aria-label'] === '這裡的世界書預設放在哪',
+  )[0].props.onChange({ target: { value: 'system-after' } })
+  assert.deepEqual(committed.pop(), { worldbookPosition: 'system-after' }, '選了要送 settings.write 的 patch')
+
+  // ③ ⚠️ 書那一格：**檔案的原始值**（沒指定 ⇒ 空字串＝跟著酒館預設）。
+  //
+  //    這一條用**純函式**驗，不是渲染整個分區：清單是非同步載入的，而假 React
+  //    的 `useEffect` 不會跑（同 §7.6 的「刪除確認列」那個限制）。
+  //    而那正是這一格最容易做錯的地方——拿算完的 `position` 去填，使用者就會
+  //    看到「跟著酒館預設」變成一個具體位置，然後以為自己被改過了。
+  const pick = exportsObject.__bookPositionValue
+  assert.equal(typeof pick, 'function', '要匯出 bookPositionValue（測試出口）')
+  assert.equal(
+    pick({ books: [{ id: 'a', position: 'system-after', explicit: true }] }, 'a'),
+    'system-after',
+    '書自己指定了 ⇒ 顯示那個值',
+  )
+  assert.equal(
+    pick({ books: [{ id: 'a', position: 'system-before', explicit: false }] }, 'a'),
+    '',
+    '⚠️ 沒指定（`explicit: false`）⇒ 空字串＝跟著酒館預設，**不是**顯示算完的預設值',
+  )
+  assert.equal(pick({ books: [] }, 'a'), '', '找不到那一本 ⇒ 空字串')
+  assert.equal(pick(null, 'a'), '', '還沒讀到 ⇒ 空字串（安全的那一邊）')
+  assert.equal(pick(undefined, 'a'), '', 'undefined 也不炸')
+
+  /**
+   * ④ ⚠️ **清單上要看得出來這本書放在哪。**
+   *
+   * 這一條是使用者回報逼出來的：「我沒有看見設定位置的按鈕」。位置那一格住在
+   * **編輯器**裡，而編輯器要選了一本書才看得到——所以沒打開任何一本書的時候，
+   * 使用者完全不知道有「位置」這件事。清單上一行短標籤就解決了。
+   *
+   * ⚠️ **`in-chat` 也要有標籤**：不畫的話會變成「沒有標籤＝沒有設定」，
+   * 而它其實是「放在訊息前面」——三種狀態都要看得見。
+   */
+  assert.deepEqual(
+    Object.values(exportsObject.__positionShort),
+    ['系統前', '系統後', '訊息前'],
+    '三個位置都要有短標籤（順序＝ system-before／system-after／in-chat）',
+  )
+  const tagSrc = source.slice(
+    source.indexOf('function positionTag(store, id)'),
+    source.indexOf('function positionValueOf(id)'),
+  )
+  assert.ok(tagSrc.includes('if (list.length === 0) return null'), '還沒讀到位置時不畫標籤（不要畫一個假的）')
+  assert.ok(tagSrc.includes('dsh-tv-posTag'), '標籤要有自己的 class 才有樣式')
+  assert.equal(
+    /one\.position === 'in-chat'[\s\S]{0,40}return null/.test(tagSrc),
+    false,
+    '⚠️ `in-chat` 不可以被當成「沒有設定」而不畫',
+  )
+
+  console.log('4u. 世界書位置 UI OK — 鏡射一致、酒館預設可選、原始值、清單上看得到位置')
+}
+
+/* --------- 房間的「📖 藏書」：書名本身就是「去改它」（2.6.66）--------- */
+
+{
+  /**
+   * 使用者回報的兩件事，其實是同一段程式的兩個毛病：
+   *
+   *   > 去改內容失效沒有跳過去
+   *   > 看內容其實你的設計方法是將他接的起來了，所以按鈕可能要再設計一下
+   *
+   * ① **跳不過去**的成因是「只換了分區、沒有換主面板」：房間那一頁是另一張面板
+   *    （`tavern-chats`），而 📖 藏書 住在酒館設定那一張（`tavern`）。少了
+   *    `selectPanel` 那一下，畫面完全不動——看起來就像按鈕壞了。
+   *
+   * ② **按鈕分不出來**的成因是「兩顆做同一件事的按鈕」：「看內容」當場把內文攤開，
+   *    而旁邊那顆「去改它」只是換一頁。現在**一個動作一個入口**：
+   *      書名   ＝ 去別的地方改（換分區 ＋ 換面板 ＋ 打開那一本）
+   *      「內容」＝ 就地展開（唯讀）
+   *
+   * ⚠️ 這一節驗的是**行為**，不是掃原始碼：跳轉走模組層級的狀態（`__jumpToBook`），
+   *    清單則靠 `__loadRoomBooks()` 驅動（載入住在 effect，假 React 不跑它）。
+   */
+  const { RoomBooksPane } = exportsObject.__components
+  const {
+    __setRpc,
+    __jumpToBook,
+    __pendingBookOpen,
+    __takePendingBookOpen,
+    __bookOpenChannel,
+    __setZone,
+    __currentZone,
+    __shownPanel,
+  } = exportsObject
+
+  const panels = []
+  exportsObject.__chat.setContext({
+    get: (key) => (key === 'layout' ? { selectPanel: (name) => panels.push(name) } : undefined),
+  })
+  __setZone('hall')
+
+  // ① 跳轉要做完三件事（少一件就是「按了沒反應」）。
+  __jumpToBook('輸出格式')
+  assert.equal(__currentZone(), 'books', '要換到「📖 藏書」那一區')
+  assert.deepEqual(panels, ['tavern'], '⚠️ 而且要把主面板真的指過去——房間那一頁是另一張面板')
+  assert.equal(__shownPanel(), 'tavern', '要記住「現在停在這一頁」，不然那顆 ＋ 的來回判斷會跟著錯')
+  assert.equal(__pendingBookOpen(), '輸出格式', '要打開哪一本要交接出去')
+
+  // 交接格**撿走就清掉**：忘了清 ＝ 下一次重畫又跳一次。
+  assert.equal(__takePendingBookOpen(), '輸出格式', '交接值要撿得到')
+  assert.equal(__pendingBookOpen(), '', '撿走之後一定要清掉')
+  assert.equal(__takePendingBookOpen(), '', '沒有東西時回空字串（呼叫端不必分辨）')
+
+  /**
+   * ⚠️ **人已經停在 📖 藏書 的時候，`MapWorldbooks` 不會重新掛載**
+   * （它只在 `currentZone === 'books'` 時掛著）——所以掛載 effect 那一下跑不到，
+   * 必須再有一條通道通知它。少了這一條，症狀是「第二本書點了沒反應」。
+   */
+  const notified = []
+  const stopWatch = __bookOpenChannel.watch(() => notified.push('open'))
+  __jumpToBook('酒館')
+  stopWatch()
+  assert.equal(notified.length, 1, 'MapWorldbooks 要聽得到「打開某一本」')
+  assert.equal(__pendingBookOpen(), '酒館', '交接值要留給它撿')
+  __takePendingBookOpen()
+  assert.match(
+    source,
+    /bookOpenChannel\.watch\(function \(\) \{\n\s*var next = takePendingBookOpen\(\)/,
+    '⚠️ 掛載時撿一次、收到通知再撿一次（只靠掛載 effect 會漏掉「已經在這一頁」那一次）',
+  )
+
+  // ② 那一列：書名是「去改它」，而且位置顯示的是**這一間房**的覆寫值。
+  const calls = []
+  const fakeRpc = (op, args) => {
+    calls.push({ op, args })
+    if (op === 'worldbook.roomPositions') {
+      return Promise.resolve({
+        room: '',
+        tavern: 'system-before',
+        books: [
+          { id: '酒館', position: 'in-chat', explicit: false, overridden: true },
+          { id: '輸出格式', position: 'system-after', explicit: true, overridden: true },
+          { id: '世界觀', position: 'in-chat', explicit: false, overridden: false },
+        ],
+        // 兩本都有覆寫：第二本同時「書自己指定」——**書自己的要贏**。
+        overrides: { 酒館: { position: 'in-chat' }, 輸出格式: { position: 'in-chat' } },
+      })
+    }
+    if (op === 'worldbook.read') {
+      return Promise.resolve({ id: args.book, entries: { 0: { comment: '第一條', content: '內文' } } })
+    }
+    return Promise.resolve({})
+  }
+  const selected = { character: '老闆娘', room: 'm1k3x9-a7f2', name: '雨夜' }
+  const props = { rpc: fakeRpc, selected, settings: {} }
+  reactImpl.resetHooks()
+  renderComponent(RoomBooksPane, props)
+  await exportsObject.__loadRoomBooks()
+  const tree = renderComponent(RoomBooksPane, props)
+
+  const names = collect(tree, (el) => el.type === 'button' && el.props.className === 'dsh-tv-bookLink')
+  assert.equal(names.length, 3, '書名本身要是一顆按鈕（＝「去改它」的入口）')
+  assert.equal(String(names[0].props.children), '酒館', '書名就是那一本的名字')
+  assert.match(String(names[0].props.title), /📖 藏書/, '要說明白按下去會去哪裡')
+
+  // 按下去要真的跳（走的是同一支 `jumpToBook`）。
+  panels.length = 0
+  __setZone('hall')
+  names[1].props.onClick()
+  assert.equal(__currentZone(), 'books', '點書名要跳到 📖 藏書')
+  assert.deepEqual(panels, ['tavern'], '而且要換主面板')
+  assert.equal(__pendingBookOpen(), '輸出格式', '要交接「打開這一本」')
+  __takePendingBookOpen()
+
+  // 「內容」是那一列唯一的另一顆按鈕（不再有第二顆做同一件事的）。
+  const peeks = collect(tree, (el) => el.type === 'button' && el.props.className === 'dsh-tv-btn')
+  assert.equal(peeks.length, 3, '一列一顆「內容」——舊的兩顆按鈕已經合成一個動作一個入口')
+  assert.equal(peeks[0].props['aria-expanded'], 'false', '平時是收起來的（跟說明那顆 `?` 同一套規矩）')
+  assert.match(String(peeks[0].props.children), /內容/)
+  assert.equal(source.includes("'去改它'"), false, '「去改它」不該再是一顆獨立按鈕（書名就是入口）')
+
+  // 位置那一格：這一間房的覆寫 → 書自己指定的（**書贏**）→ 都沒有＝聽這一間房的。
+  const posSelects = collect(tree, (el) => el.props.className === 'dsh-tv-in dsh-tv-inInline')
+  assert.equal(posSelects.length, 3, '一本一顆位置選單（擠在同一列，所以不能用 MapSelect 那一整格）')
+  assert.deepEqual(
+    posSelects.map((one) => String(one.props.value)),
+    ['in-chat', 'system-after', ''],
+    '⚠️ 覆寫優先、但書自己指定的那一本要贏過覆寫；都沒有才是空字串（＝聽這一間房的預設）',
+  )
+  assert.deepEqual(
+    posSelects[0].props.children.map((o) => String(o.props.value)),
+    ['', 'system-before', 'system-after', 'in-chat'],
+    '第一個選項是空字串（＝聽這一間房的預設）',
+  )
+
+  // 「內容」按下去：讀那一本，而且**每按一次都重讀**（書的內容可能剛被改過）。
+  calls.length = 0
+  peeks[0].props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual(
+    calls.map((one) => one.op + ':' + (one.args === undefined ? '' : String(one.args.book))),
+    ['worldbook.read:酒館'],
+    '「內容」要讀那一本的內容',
+  )
+
+  exportsObject.__chat.setContext(null)
+  reactImpl.resetHooks()
+  __setZone('hall')
+  console.log('4w. 房間藏書列 OK — 書名＝去改它（換分區又換面板）、交接值撿走就清、內容是就地展開')
+}
+
+/* --------- 欄位說明：`?` 平時摺疊（2.6.60）--------- */
+
+{
+  /**
+   * 使用者：
+   *   > 在附近有沒有解釋？我以前玩 TrueNAS，附近有個**問號**讓我能夠看看
+   *   > 是什麼意思，**平時就摺疊起來**
+   *
+   * ⚠️ 這一節要釘住**兩件事**，而且第二件才是重點：
+   *   1. 有說明時才畫那顆 `?`——**按了沒東西的問號比沒有問號更糟**
+   *   2. **平時是收起來的**（`aria-expanded="false"`、沒有說明內文）
+   */
+  const { TavernSettingsPage, MapSelect } = exportsObject.__components
+  const { __setRpc } = exportsObject
+  __setRpc(() => Promise.resolve({}))
+
+  const tree = (() => {
+    reactImpl.resetHooks()
+    return renderComponent(MapSelect, {
+      label: '測試欄位',
+      value: 'a',
+      options: [
+        { value: 'a', label: '甲', hint: '甲是什麼意思' },
+        { value: 'b', label: '乙', hint: '乙是什麼意思' },
+      ],
+      onChange: () => {},
+    })
+  })()
+
+  const help = collect(tree, (el) => String(el.props.className || '') === 'dsh-tv-help')[0]
+  assert.ok(help !== undefined, '有說明時要畫那顆 `?`')
+  assert.equal(help.props.children, '?', '它是問號（不是圖示、不是「說明」兩個字）')
+  assert.equal(help.props['aria-expanded'], 'false', '⚠️ 平時是**收起來**的')
+  assert.match(String(help.props['aria-label']), /測試欄位/, '⚠️ 無障礙名稱要帶欄位名（不然讀不出是哪一格）')
+
+  // ② 平時**沒有**說明內文。
+  assert.equal(
+    collect(tree, (el) => String(el.props.className || '') === 'dsh-tv-helpBody').length,
+    0,
+    '⚠️ 平時不可以把說明畫出來（那就不是「摺疊」了）',
+  )
+
+  // ③ 按下去要展開，而且展開的是**現在選中那一項**的說明。
+  help.props.onClick({ preventDefault: () => {}, stopPropagation: () => {} })
+  const open = collect(renderComponent(MapSelect, {
+    label: '測試欄位',
+    value: 'a',
+    options: [
+      { value: 'a', label: '甲', hint: '甲是什麼意思' },
+      { value: 'b', label: '乙', hint: '乙是什麼意思' },
+    ],
+    onChange: () => {},
+  }), (el) => String(el.props.className || '') === 'dsh-tv-helpBody')
+  assert.equal(open.length, 1, '按了要展開')
+  assert.equal(flatten(open[0]), '甲是什麼意思', '⚠️ 展開的是**目前選中那一項**的說明')
+
+  // ④ 選擇另一個選項 ⇒ 說明跟著換（不必重按一次）。
+  const other = collect(renderComponent(MapSelect, {
+    label: '測試欄位',
+    value: 'b',
+    options: [
+      { value: 'a', label: '甲', hint: '甲是什麼意思' },
+      { value: 'b', label: '乙', hint: '乙是什麼意思' },
+    ],
+    onChange: () => {},
+  }), (el) => String(el.props.className || '') === 'dsh-tv-helpBody')
+  assert.equal(flatten(other[0]), '乙是什麼意思', '⚠️ 換選項時下面的說明要跟著換')
+
+  // ⑤ **沒有說明就不畫那顆 `?`**（欺騙性的 UI）。
+  const bare = (() => {
+    reactImpl.resetHooks()
+    return renderComponent(MapSelect, {
+      label: '沒有說明的欄位',
+      value: 'a',
+      options: [{ value: 'a', label: '甲' }],
+      onChange: () => {},
+    })
+  })()
+  assert.equal(
+    collect(bare, (el) => String(el.props.className || '') === 'dsh-tv-help').length,
+    0,
+    '⚠️ 沒有說明時不可以畫一顆按了沒東西的問號',
+  )
+
+  // ⑥ 收起來（再按一次）。
+  help.props.onClick({ preventDefault: () => {}, stopPropagation: () => {} })
+  assert.equal(
+    collect(renderComponent(MapSelect, {
+      label: '測試欄位',
+      value: 'a',
+      options: [{ value: 'a', label: '甲', hint: '甲是什麼意思' }],
+      onChange: () => {},
+    }), (el) => String(el.props.className || '') === 'dsh-tv-helpBody').length,
+    0,
+    '再按一次要收起來（展開↔收起是同一顆）',
+  )
+
+  void TavernSettingsPage
+  console.log('4v. 欄位說明 OK — 有說明才有問號、平時摺疊、展開的是選中那一項、可以收回')
 }
 
 /* --------- 輪次刻度：分輪規則，以及「刻度不可以跟著內容捲」（2.6.52）--------- */
@@ -2613,7 +3466,9 @@ function spyRpc(seen, extra) {
   const sliceOf = (from, to) => source.slice(source.indexOf(from), source.indexOf(to))
   const counts = {
     AssetManager: sliceOf('function AssetManager(props)', 'function MapTavernActions(props)'),
-    MapWorldbooks: sliceOf('function MapWorldbooks()', 'function MapChatFiles(props)'),
+    // ⚠️ 切片的起點是**函式簽章的字串**，所以簽章改了這裡也要改
+    //    （`MapWorldbooks()` → `MapWorldbooks(props)`，2.6.59 多了 props）。
+    MapWorldbooks: sliceOf('function MapWorldbooks(props)', 'function MapChatFiles(props)'),
     MapChatFiles: sliceOf('function MapChatFiles(props)', 'function MapOverview(props)'),
   }
   const notifyTimes = (text) => (text.match(/notifyWorkspaceChanged\(\)/g) || []).length
@@ -3239,8 +4094,8 @@ function spyRpc(seen, extra) {
     )
     assert.deepEqual(
       tabs.map((one) => one.props.children),
-      ['💬 對話', '🖼️ 插圖', '⚙️ 房間', '📄 檔案'],
-      '對話頁要有四個分頁（跟分區列同一組樣式）',
+      ['💬 對話', '🖼️ 插圖', '⚙️ 房間', '📖 藏書', '📄 檔案'],
+      '對話頁要有五個分頁（跟分區列同一組樣式）——📖 藏書 是這一間房自己的（2.6.64）',
     )
     assert.match(tabs[0].props.className, /dsh-tv-zoneOn/, '預設要停在「對話」')
 
@@ -4307,6 +5162,9 @@ function spyRpc(seen, extra) {
   assert.equal(rowOf(), undefined, '讀不到用量就留空，不要畫一個 0 騙人')
 
   // 權限說明：使用者說「描述都非常差」——所以寫的是**它拿到什麼**，不是工具名稱。
+  // ⚠️ 2.6.59 之後這些說明住在各選項的 `hint`（不是塞在 `label` 裡）——
+  //    使用者回報「選項塞一大段解釋」很難用，所以名字與解釋分開了。
+  //    這一條驗的是**說明還在**，而且還是人話。
   assert.equal(/read、glob、grep/.test(source), false, '權限選項不可以只寫工具名稱')
   assert.equal(/web_search、web_fetch/.test(source), false, '同理，上網那一項也不可以')
   assert.ok(
@@ -4314,7 +5172,7 @@ function spyRpc(seen, extra) {
     '「全關」要寫成人話：它看不到你的檔案、也不能跑指令',
   )
   assert.ok(
-    /它可以自己翻角色卡、世界書與對話紀錄/.test(source),
+    /可以自己翻角色卡、世界書與對話紀錄/.test(source),
     '「只讀」要寫成它真的能做的事',
   )
 

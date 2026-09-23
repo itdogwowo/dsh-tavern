@@ -12,11 +12,17 @@ import assert from 'node:assert/strict'
 const {
   DEFAULT_BUDGET_CHARS,
   SELECTIVE_LOGIC,
+  WORLDBOOK_POSITION_INFO,
+  WORLDBOOK_POSITIONS,
   activationOf,
   collectLore,
+  groupByPosition,
   matchesKey,
   normalizeEntries,
+  normalizePosition,
+  positionOf,
   prependLore,
+  textOfEntries,
   textOfMessages,
 } = await import('./lib/worldbook.js')
 
@@ -245,7 +251,153 @@ const {
   assert.equal(textOfMessages(null), '', '不是陣列時回空字串')
   assert.equal(textOfMessages([{ role: 'user' }]), '', '沒有 content 時回空字串')
 
-  console.log('5. 注入 OK — 接在最新一則、保留 id/role/source、不改原陣列')
+  console.log('6. 注入 OK — 接在最新一則、保留 id/role/source、不改原陣列')
+}
+
+/* --------------------------- 注入位置（2.6.59）--------------------------- */
+
+{
+  /**
+   * ⚠️ **這一節推翻了一份舊的判斷**：`docs/worldbook-plan.md` 第 131 行寫著
+   * 「DSH 只給使用者訊息一個槓桿，所以 ST 的八種位置我們只有一種」。
+   * 那**只對一半**——`ctx.systemPrompt.variable()` 的取值函式每一輪都重跑
+   * （2.6.47 的 live-reload 就是靠它），所以系統提示是第二個槓桿。
+   *
+   * 三個位置的優先序：**這本書自己 → 酒館預設 → `in-chat`**。
+   * ⚠️ 最後那一個**必須是 `in-chat`**：那是 2.6.58 以前的行為，
+   * 所以「沒設定」的既有酒館一個字都不變。
+   */
+  assert.deepEqual(WORLDBOOK_POSITIONS, ['system-before', 'system-after', 'in-chat'], '三個位置')
+  for (const one of WORLDBOOK_POSITIONS) {
+    assert.equal(typeof WORLDBOOK_POSITION_INFO[one].label, 'string', `${one} 要有人話標籤`)
+    assert.equal(typeof WORLDBOOK_POSITION_INFO[one].hint, 'string', `${one} 要有說明`)
+  }
+
+  // 書自己指定 ⇒ 蓋過房間與酒館。
+  assert.equal(positionOf({ position: 'system-after' }, 'system-before'), 'system-after', '書自己指定優先')
+  // ⚠️ **書沒指定 ⇒ 先問房間那一層**（2.6.62 加的）。
+  assert.equal(
+    positionOf({ entries: {} }, 'system-after', 'system-before'),
+    'system-after',
+    '⚠️ 房間蓋過酒館（由窄到寬：書 → 房 → 酒館）',
+  )
+  // 房間也沒指定 ⇒ 才輪到酒館。
+  assert.equal(positionOf({ entries: {} }, '', 'system-before'), 'system-before', '房間沒指定才用酒館')
+  assert.equal(positionOf({ entries: {} }, null, 'system-before'), 'system-before', '房間的 null ＝ 聽酒館的')
+  // 兩層都沒有 ⇒ **in-chat**（＝與以前一字不差）。
+  assert.equal(positionOf({ entries: {} }, '', ''), 'in-chat', '⚠️ 預設必須是 in-chat（舊行為）')
+  assert.equal(positionOf(null, undefined, undefined), 'in-chat', '壞輸入也一樣')
+
+  // ST 的數字要接得住（匯入的書帶著它們）。
+  assert.equal(positionOf({ position: 0 }, ''), 'system-before', 'ST 0 ＝ 角色定義前')
+  assert.equal(positionOf({ position: 1 }, ''), 'system-after', 'ST 1 ＝ 角色定義後')
+  for (const value of [2, 3, 4, 5, 6, 7]) {
+    assert.equal(positionOf({ position: value }, ''), 'in-chat', `ST ${value}（對話中第 N 層）⇒ 我們只有尾巴`)
+  }
+  // ST 的數字**蓋不過酒館預設**嗎？——蓋得過（它就是「這本書自己指定」）。
+  assert.equal(positionOf({ position: 4 }, 'system-after'), 'in-chat', '⚠️ ST 的 4 是明確的 in-chat，不是「沒指定」')
+  // 胡說八道的位置名 ⇒ 當作沒指定（往下退），不是當成 in-chat 蓋掉預設。
+  for (const junk of ['nope', 42, {}, [], true]) {
+    assert.equal(normalizePosition(junk), '', `${JSON.stringify(junk)} 不合法`)
+    assert.equal(positionOf({ position: junk }, 'system-after'), 'system-after', `${JSON.stringify(junk)} ⇒ 退回酒館預設`)
+  }
+
+  // `collectLore` 把位置**掛在挑中的條目上**（給後面的分堆用）。
+  const books = [
+    { id: '格式', data: { position: 'system-after', entries: { 0: { uid: 0, content: 'SPEC', constant: true } } } },
+    { id: '酒館', data: { entries: { 0: { uid: 0, content: 'LORE', constant: true } } } },
+    { id: '關鍵字', data: { position: 'system-before', entries: { 0: { uid: 0, key: ['龍'], content: 'DRAGON', constant: false } } } },
+  ]
+  const lore = collectLore(books, '這裡有一條龍', { defaultPosition: 'in-chat' })
+  const byContent = {}
+  for (const one of lore.entries) byContent[one.content] = one.position
+  assert.equal(byContent.SPEC, 'system-after', '書自己的位置要跟著條目走')
+  assert.equal(byContent.LORE, 'in-chat', '沒指定的跟酒館預設走')
+  assert.equal(byContent.DRAGON, 'system-before', '關鍵字命中的也一樣')
+
+  // ⚠️ **房間那一層真的會蓋過酒館**（`roomPosition`）。
+  const roomLore = collectLore(books, '這裡有一條龍', { defaultPosition: 'in-chat', roomPosition: 'system-after' })
+  const byRoom = {}
+  for (const one of roomLore.entries) byRoom[one.content] = one.position
+  assert.equal(byRoom.LORE, 'system-after', '⚠️ 房間蓋過酒館（酒館說 in-chat）')
+  assert.equal(byRoom.SPEC, 'system-after', '書自己指定的優先序不變（它本來就是 system-after）')
+  assert.equal(byRoom.DRAGON, 'system-before', '書自己指定也仍然最優先')
+
+  // 分堆：三堆都在，而且**排序在切開之後仍然成立**（order 由大到小）。
+  const grouped = groupByPosition(lore.entries)
+  assert.deepEqual(Object.keys(grouped).sort(), ['in-chat', 'system-after', 'system-before'], '三堆')
+  assert.deepEqual(grouped['system-after'].map((one) => one.content), ['SPEC'])
+  assert.deepEqual(grouped['system-before'].map((one) => one.content), ['DRAGON'])
+  assert.deepEqual(grouped['in-chat'].map((one) => one.content), ['LORE'])
+  // 壞輸入不可以丟錯。
+  assert.deepEqual(groupByPosition(null), { 'system-before': [], 'system-after': [], 'in-chat': [] }, 'null 不炸')
+  assert.equal(groupByPosition([{ content: 'x' }])['in-chat'].length, 1, '沒有 position 的條目落到 in-chat')
+  assert.equal(textOfEntries(grouped['system-after']), 'SPEC', '接回文字')
+  assert.equal(textOfEntries(null), '', 'null 回空字串')
+
+  console.log('7. 注入位置 OK — 書→房→酒館→in-chat、ST 的數字接得住、分三堆、排序不變')
+}
+
+/* ------------------- 房間對「個別世界書」的覆寫（2.6.64）------------------- */
+
+{
+  /**
+   * 使用者：「房間也要世界書管理頁面，酒館的是預設所有房間都會是預設，
+   * 房間的時候其微調可以自己在整理兩層，所以要加一個新標籤」。
+   *
+   * ⚠️ 覆寫的粒度是**一本書**（不是一條條目）：條目是**書的內容**，
+   * 而房間要調的是「這一場要不要用它、把它放在哪」。
+   */
+  const a = { id: 'A', data: { entries: { 0: { uid: 0, content: 'A-LORE', constant: true } } } }
+  const b = { id: 'B', data: { entries: { 0: { uid: 0, content: 'B-LORE', constant: true } } } }
+  const ids = (list) => list.entries.map((one) => one.content).sort()
+
+  // ① 沒有覆寫 ⇒ 兩本都在，而且**使用者的書一個欄位都沒被動到**。
+  const plain = collectLore([a, b], '', { defaultPosition: 'in-chat' })
+  assert.deepEqual(ids(plain), ['A-LORE', 'B-LORE'], '沒有覆寫時兩本都在')
+  assert.equal(a.data.position, undefined, '⚠️ 覆寫不可以改到使用者的書')
+  assert.equal(a.data.positionIfUnset, undefined, '⚠️ 也不可以把影子欄位留在原物件上')
+
+  // ② 關掉一本 ⇒ 它整本不出現（另一本不受影響）。
+  const off = collectLore([a, b], '', { defaultPosition: 'in-chat', bookOverrides: { B: { enabled: false } } })
+  assert.deepEqual(ids(off), ['A-LORE'], '⚠️ 房間關掉的那一本不該出現')
+
+  // ③ 指定一本的位置 ⇒ 那一本換位置，別本照舊。
+  const moved = collectLore([a, b], '', {
+    defaultPosition: 'in-chat',
+    bookOverrides: { B: { position: 'system-after' } },
+  })
+  assert.equal(moved.entries.find((one) => one.content === 'B-LORE').position, 'system-after', 'B 要換位置')
+  assert.equal(moved.entries.find((one) => one.content === 'A-LORE').position, 'in-chat', 'A 照舊')
+
+  // ④ ⚠️ **書自己指定的位置贏過房間的覆寫**——那條優先序是這個功能的地基。
+  const fixed = {
+    id: 'C',
+    data: { position: 'system-before', entries: { 0: { uid: 0, content: 'C-LORE', constant: true } } },
+  }
+  const roomTried = collectLore([fixed], '', {
+    defaultPosition: 'in-chat',
+    bookOverrides: { C: { position: 'system-after' } },
+  })
+  assert.equal(
+    roomTried.entries[0].position,
+    'system-before',
+    '⚠️ 書自己指定的位置**贏過**房間的覆寫（書是最明確的意圖）',
+  )
+  // 但房間還是可以**關掉**它（那是不同的軸：要不要用 vs 放在哪）。
+  assert.equal(
+    collectLore([fixed], '', { defaultPosition: 'in-chat', bookOverrides: { C: { enabled: false } } }).entries.length,
+    0,
+    '房間仍然可以關掉一本「自己指定了位置」的書',
+  )
+
+  // ⑤ 壞覆寫不可以丟錯，也不可以讓書整本消失。
+  for (const junk of [null, 'x', 7, [], { A: 'x' }, { A: null }, { 不存在的書: { enabled: false } }]) {
+    const out = collectLore([a, b], '', { defaultPosition: 'in-chat', bookOverrides: junk })
+    assert.equal(out.entries.length >= 1, true, `${JSON.stringify(junk)} 不可以讓所有書消失`)
+  }
+
+  console.log('8. 房間的逐書覆寫 OK — 關掉一本、指定位置、書自己指定贏過房間、壞覆寫不丟錯')
 }
 
 /* ----------------------------- 跟 default 對齊 ---------------------------- */
@@ -257,7 +409,7 @@ const {
   assert.equal(SELECTIVE_LOGIC.NOT_ALL, 1)
   assert.equal(SELECTIVE_LOGIC.NOT_ANY, 2)
   assert.equal(SELECTIVE_LOGIC.AND_ALL, 3)
-  console.log('6. 常數 OK — 預設預算與 selectiveLogic 都跟 ST 對齊')
+  console.log('9. 常數 OK — 預設預算與 selectiveLogic 都跟 ST 對齊')
 }
 
 console.log('\n全部通過 ✅')

@@ -31,8 +31,8 @@ DSH 有能力但沒有角色扮演的前台。這個插件是把兩邊接起來�
 
 | | |
 |---|---|
-| 版本 | **2.6.55**（6b 收尾 ＋ persona ＋ 生成參數 ＋ 每房設定 ＋ 權限 chip ＋ 選單出界 ＋ 輸入框沉底／輪次刻度）。**還沒 commit**——這台沒有 git；GitHub `main` 上還是 2.5.0 |
-| 測試 | `npm test` **十套全綠**（`verify` / `test-pngcard` / `test-worldbook` / `test-agent` / `test-preset` / **`test-samplers`** / `smoke` / `test-workspace` / `test-registry` / `test-client`）|
+| 版本 | **2.6.57**（… ＋ `stop` 序列 ＋ **回覆格式的「指定」那一半**）。**還沒 commit**——這台沒有 git；GitHub `main` 上還是 2.5.0 |
+| 測試 | `npm test` **十一套全綠**（`verify` / `test-pngcard` / `test-worldbook` / `test-agent` / `test-preset` / `test-samplers` / **`test-render`** / `smoke` / `test-workspace` / `test-registry` / `test-client`）|
 | 架構 | **三個面全部實作完成**：宿主半、瀏覽器半、**Agent 面** |
 | 規範 | 12 條（R1–R13），**每一條都有測試釘住** |
 | 真聊天 | ✅ 打通了；逐字串流、寫回 `.jsonl`、思考列、換角色換卡都實測過 |
@@ -42,9 +42,112 @@ DSH 有能力但沒有角色扮演的前台。這個插件是把兩邊接起來�
 | 酒館 | 一間（使用者自己選的資料夾）|
 | 對話框 | ✅ 模型 chip（顯示名稱 ＋ 思考強度）、選單、全新的房也能選（順手開 session）、等級會收斂。**2.6.43** |
 | op 命名 | ✅ **只有 `room.*`**（`chat.*` 那六個相容 op 在 2.6.46 拆掉了）|
-| 生成參數 | ✅ 溫度／最多 token，房間蓋過酒館。⚠️ **`top_p` 做不到**（DSH 介面沒有它），見 §2.6.48 |
+| 生成參數 | ✅ 溫度／最多 token／**`stop` 序列（有開關）**，房間蓋過酒館。⚠️ **`top_p` 做不到**（DSH 介面沒有它），見 §2.6.48 |
+| 回覆格式 | ✅ **2.6.57 補上「指定」那一半**（`render.json` → 提示詞）。見 §2.6.57——在那之前只有「解碼」 |
 | 每房設定 | ✅ **2.6.49 才真的生效**（`session.bind` 以前沒轉送 `room`），見 §2.6.49——這一條含工具權限／這一場的指示／生成參數 |
 | composer | ✅ 附件鈕、**工具權限 chip**、檔案路徑、模型 chip、計量環、送出（2.6.50）|
+
+### 2.6.59 這一輪（世界書的**注入位置**）
+
+使用者看完 `老闆娘/mudr85ml-irox` 那間房的檢查之後說：「這應該是酒館設定不同注入詞的
+位置吧，**用戶可以自己設定這本書放在哪裏**」——**完全正確**，而且這一輪推翻了一份舊判斷。
+
+完整說明在 `CHANGELOG.md` 的 2.6.59。接手的人**一定要先知道**這四件事：
+
+1. ⚠️ **`docs/worldbook-plan.md` 原本寫「我們只有一種位置」是錯的。**
+   `ctx.systemPrompt.variable()` 的取值函式**每一輪都重跑**（2.6.47 的
+   live-reload 就是那個機制的證據）⇒ 系統提示**也是**一個槓桿。現在有三個位置。
+2. ⚠️ **預設必須是 `in-chat`**（接在最新訊息前面）——那是 2.6.58 以前的行為，
+   所以「沒設定」的既有酒館**一個字都不變**。優先序：
+   **書自己的 `position` → `tavern.json` 的 `worldbookPosition` → `in-chat`**。
+3. ⚠️ **`system-after` 是唯一有代價的位置**：系統提示每輪變 ⇒ **KV 快取前綴失效**
+   （實測 77～82% 的命中率就是靠「只動尾端」換來的）。所以它**不是預設**，
+   而畫面上的說明直接寫出代價。
+4. ⚠️ **`agent/pre-step` 只接 `in-chat` 那一堆**；`system-*` 走系統提示。
+   兩邊都要用**同一份** `collectLore` 的結果，而系統提示那一邊靠一個
+   **per-agent 的掃描文字快取**（key 是 agent id——同一份 preset 服務所有
+   session，共用一格會讓 A 房的關鍵字觸發 B 房的條目）。
+
+### 2.6.58 這一輪（世界書教的舊寫法 ＋ 探針改成唯讀）
+
+使用者重啟後說：「重啟了這些都是預設的提示詞、世界書用的」。去讀他的酒館才發現
+**他早就有一本 `輸出格式.json` 世界書在做同一件事**——`render.json` 的
+`structured` 模式與它是**同一個功能的兩種做法**。順手抓到兩件事：
+
+1. ⚠️ **`data`／`choices` 的舊寫法一律降級成旁白。** 他的世界書教的是
+   `{"kind":"data","text":"時間：晚上十一點\n心情：疲倦"}`（內容在 `text` 裡、
+   用 **JSON 轉義的 `\n`** 分行）。2.6.57 只認 `rows`／`items` ⇒ 永遠
+   `missing-rows` ⇒ 畫面上一行**夾著看得見的 `\n`** 的文字，而不是一張表。
+   修法兩處：`parseDataRows()`／`parseChoices()` 要**同時認真的換行與字面上的 `\n`**；
+   `parseStructuredLine()` 要**先試 `rows`／`items`、再試 `text`**。
+   > **教訓**：修格式問題之前**先看使用者手上真正的樣本**——我照著自己寫的指令修，
+   > 只修了一半，而所有測試都是綠的。
+2. ⚠️ **`verify-stop.mjs` 的第一版有副作用**（已改成完全唯讀）。見下面的 `fetch` 那一條。
+
+⚠️ **還有一件還沒決定的事**（要問使用者）：**格式指令現在有兩個來源**——
+他的世界書（`constant`、position 4、在**訊息**裡）與 `render.json` 的系統提示指令。
+兩者同時開著時會給模型**兩份規格**（例如 `data` 一邊說用 `text`、一邊說用 `rows`）。
+兩邊都吃得下，但「一個東西兩個來源」違反這個 repo 的既有規矩。
+
+⚠️ **`fetch` 的已知現象**（寫驗證腳本前先讀）：用 **Node 的 `fetch`（或 `node:http`）
+送帶 body 的請求到 `dsh web`，body 到不了宿主半的路由**——宿主收到空的，
+於是 `writeSettings({})` 靜靜地更新 `updatedAt`、什麼都沒改，而**沒有任何錯誤**。
+`curl` 與 PowerShell 正常。成因未查明（不是 `Content-Encoding`，undici 會自己解 gzip）。
+**要寫入就用 `curl` 或 PowerShell。**
+
+### 2.6.57 這一輪（回覆格式的**指定**那一半 ＋ stop 開關）
+
+使用者：「回覆格式 §9…也要設定」＋「**我記得之前的要求是回覆的時候已經是指定的 json
+格式，而不是我們現在靠後期解碼**」＋「剛才的設定是要成為一個開關的」。
+完整說明在 `CHANGELOG.md` 的 2.6.57。接手的人**一定要先知道**這四件事：
+
+1. ⚠️ **我們一直只有「解碼」，沒有「指定」。** `parseStructuredLine`／
+   `parseMarkedRegions` 早就寫好了，但**沒有任何提示詞告訴模型要那樣寫**——
+   所以永遠是「模型寫小說、我們在後面猜」，而 `choices`／`data`／`thought`／
+   `panel`／`title` 這五種 kind **一次都沒有出現過**。
+   這一輪補的是前半段：`<酒館>/render.json` → `lib/render.js` →
+   `renderDirectiveFor()` → 系統提示。
+2. ⚠️ **`plain` 是預設，而且它「一個字都不加」**。那不是保守，是「這一版上線時
+   既有使用者的提示詞一個字都不變」的實作方式。**不要為了「一致性」讓 plain 也講一句。**
+3. ⚠️ **只有 `marked` 模式把標記交給解析器**（`parseConfigFromRender`）：
+   `structured` 模式下模型吐了 `<台詞>` 代表它**走樣了**，我們應該看見那些角括號
+   （`unknown-tag` 也會回報），不是默默畫成台詞。
+4. ⚠️ **`data`／`choices` 的內容不在 `text` 裡**（在 `rows`／`items`），而
+   `parseStructuredLine` 以前對每一行都要求 `text`——所以**那兩個 kind 從第一天起
+   就不可能解析成功**（症狀：畫面上是一整行原始 JSON）。現在它們走自己的欄位。
+
+順手抓到的兩個實測坑（都留了註解）：
+- **`var` 的提升只提升宣告、不提升值**：`PARSE_DEFAULT_CONFIG` 被搬上去用、
+  宣告還在下面 → 模組執行期 `undefined.quotes` → **整個 client bundle 白屏**。
+- **`includes('dsh-tv-dataBar')` 也會命中 `dsh-tv-dataBarFill`** → 一條進度條被算成兩條。
+
+⚠️ **這一輪動到三個面 ＋ 一個新檔（`lib/render.js`）→ 要重啟 `dsh web`**（見 §11）。
+
+### 2.6.56 這一輪（`stop` 序列：第二種**形狀**）
+
+`plan.md` §8 上「DSH 支援它、但不在要求裡」的那一條（使用者挑的）。
+完整說明在 `CHANGELOG.md` 的 2.6.56。接手的人只要記這五件事：
+
+1. ⚠️ **它是閘門，不是旋鈕。** 模型吐出其中任何一個字串就停，而且那一串
+   **不會出現在回覆裡**。角色扮演最實用的用法是**擋住模型替你說話**。
+2. ⚠️ **形狀與前兩個不同（清單 vs 數字），所以「前兩個會過」不能推論它也會過。**
+   三個地方各有一條只有它才會踩到的規矩：
+   - 「沒有設定」**有兩種寫法**（`null` 與 `[]`）→ 存檔統一成 `null`。兩種並存
+     會出現「這一間是空的、那一間是沒有」的假區別，而那個差別決定要不要退回酒館那一組。
+   - `samplerRequestFields` 要**同時**檢查「不是 null」與「長度 > 0」——空陣列漏出去
+     ＝一個「裡面沒有東西的 stop 欄位」。
+   - 上限不是範圍而是**數量與長度**（`STOP_LIMITS`：16 個／64 字）。
+3. ⚠️ **拆行是宿主半的事**（`normalizeStop()`）。客戶端把 `<textarea>` 的整段文字
+   **原樣**送出去——兩邊各拆一份就會出現「面板預覽一種、實際送出另一種」。
+4. ⚠️ **`stop` 也是「房間蓋過酒館」，不是兩層聯集。** 聯集在這裡其實說得通，
+   但那會造出一個**只有這個欄位才有的規矩**——`resolveSamplers()` 存在的全部理由
+   就是「同一條規則只有一個來源」。要改的話那是一個獨立的決定（改函式＋改測試＋改文案）。
+5. ✅ **順手拆掉一個「只改一邊」的溫床**：`writeSettings` 與 `writeRoom` 原本各有一份
+   一模一樣的 sampler 迴圈，現在共用 `applySamplerPatch()`。加第三個欄位時那個形狀
+   就會咬人——漏掉酒館那一半的症狀是「酒館層存不進去、房間層可以」。
+
+⚠️ **這一輪動到三個面 → 要重啟 `dsh web`**（見 §11 的重啟後驗收清單）。
+
 
 ### 2.6.55 這一輪（刻度寬度：**去量原版，不要自己發明**）
 
@@ -530,7 +633,8 @@ itemPosition(index) = index * TURN_SPACING_PX
 | 世界書的掃描範圍 | **只掃這一輪進入的訊息**，不是 ST 的「最後 N 則」 |
 | 使用者人設（persona） | ✅ **完成**（2.6.5 寫好、**2.6.47 才真的生效**——見 §2） |
 | 生成參數（溫度、max tokens） | ✅ **完成**（2.6.48）。⚠️ **`top_p` 做不到**：DSH 的 `LlmCallConfig` 沒有那個欄位 |
-| `stop` 序列（DSH 支援，角色扮演用得到） | 沒做。不在要求裡，要的話是一個獨立的小工作 |
+| **`stop` 序列**（擋住模型替你說話） | ✅ **完成**（**2.6.56**，**2.6.57 加上開關**——見 §2.6.56／§2.6.57）。三層都有：`tavern.json`／`room.json`／`agent/request` |
+| **回覆格式的「指定」那一半** | ✅ **完成**（**2.6.57**——見 §2.6.57）。`render.json` → 提示詞；`choices` 可點（預設關）、`rows` 表格＋進度條 |
 | 匯出單卡（PNG＋JSON） | ✅ **完成**（2.6.x；`client.js` 的 `📤 匯出 PNG 卡`） |
 | 匯出／備份**整間酒館** | 沒做（一個資料夾，手動複製就是備份） |
 | 酒館自己的工具（擲骰、換表情圖、記筆記） | 沒做。**這是「只有 DSH 做得到」的那一塊** |
@@ -581,15 +685,29 @@ lib/roomfiles.js   房間的**附件**（`<room>/files/`：訊息裡夾帶的圖
 lib/pngcard.js     PNG 角色卡：tEXt chunk 的**讀**與**寫**（寫回要用 `replaceCardInPng`）
 lib/write.js       原子寫入（暫存檔 → rename）
 lib/defaults.js    新建酒館的預設內容（老闆娘 ＋ 世界書；老闆娘是 PNG 卡）
-lib/samplers.js    生成參數（temperature／maxTokens）的**純函式**：驗證、正規化、
-                   「房間蓋過酒館」。三個呼叫端共用（`workspace.js` 寫入時驗、
+lib/samplers.js    生成參數（temperature／maxTokens／**stop＋它的開關**）的**純函式**：
+                   驗證、正規化、「房間蓋過酒館」。三個呼叫端共用（`workspace.js` 寫入時驗、
                    `agent.js` 每一輪算、`client.js` 顯示）——抄三份就會出現
                    「面板顯示 0.8、實際送 0.7」。⚠️ **沒有 top_p，那是刻意的**
+lib/render.js      **回覆格式**（新，2.6.57）：`render.json` 的正規化、三種模式
+                   （plain／marked／structured）、**格式指令的文字**（＝提示詞）、
+                   以及 `choices`／`rows` 的解析小工具。純函式、零 import。
+                   ⚠️ 它是「**指定**」那一半——沒有它，客戶端的解析再強也只是在猜
 ```
 
 **測試**：`verify.mjs`（安裝前契約）、`test-agent.mjs`、`test-worldbook.mjs`、
-`test-samplers.mjs`、`smoke.mjs`（宿主半整合）、`test-workspace.mjs`、
-`test-registry.mjs`、`test-client.mjs`、`test-pngcard.mjs`、`test-preset.mjs`。
+`test-samplers.mjs`、**`test-render.mjs`**、`smoke.mjs`（宿主半整合）、
+`test-workspace.mjs`、`test-registry.mjs`、`test-client.mjs`、`test-pngcard.mjs`、
+`test-preset.mjs`。
+
+**工具**（不是測試，是「一次性但要留著」的探針）：
+
+| 檔案 | 做什麼 |
+|---|---|
+| `parse-preview.mjs` | 貼一段文字看 `parseMessage` 的結果（回覆格式） |
+| `build-sample.mjs` | 把 `defaults.js` 的預設角色做成出貨的 PNG 卡 |
+| `make-card.mjs` | 造一張測試用的卡 |
+| **`verify-stop.mjs`** | **重啟後的驗收**：宿主半版本／`stop` 欄位活著沒／最近的 `request/header`。**只讀不寫** |
 
 ---
 
@@ -1091,11 +1209,12 @@ client 的元件樣式        只准寫 var(--dsh-tv-*)，不准有 hex（測試
 | 世界書的 `position` 八種插入位置 | **不做**（我們只有一種） |
 | 世界書的 `probability`／`sticky`／`cooldown`／`delay`／**遞迴** | **不做**（理由見 §9） |
 | 世界書的掃描範圍 | **只掃這一輪進入的訊息**，不是 ST 的「最後 N 則」 |
-| 酒館自己的工具（擲骰、換表情圖、記筆記） | 沒做。**這是「只有 DSH 做得到」的那一塊** |
+| ~~酒館自己的工具（擲骰、換表情圖、記筆記）~~ | **沒做**。**這是「只有 DSH 做得到」的那一塊**（要做要先回答 §9 的問題 2） |
+| ~~回覆格式 §9 的三條留白~~ | ✅ **2.6.57 全部定案**（`render.json` 的位置、`choices` 可點但預設關、`rows` 表格＋進度條）。見 `docs/reply-format.md` §9 |
 | ~~使用者人設（persona）~~ | ✅ **已完成**（見 §2 的 2.6.47——它寫好了卻從來沒生效過） |
 | ~~匯出（單卡／整間酒館）~~ | 單卡 ✅ 完成（PNG ＋ JSON，`client.js` 的 `📤 匯出 PNG 卡`）；**整間酒館**沒做（資料夾本身就是備份） |
 | ~~生成參數（溫度、max tokens）~~ | ✅ **已完成**（見 §2 的 2.6.48）。⚠️ **`top_p` 是做不到的**，不是沒做 |
-| `stop` 序列 | 沒做。DSH 支援它，角色扮演也用得到（擋住模型替你說話）——但那不在要求裡 |
+| ~~`stop` 序列~~ | ✅ **已完成**（**2.6.56**，見 §2.6.56）。DSH 支援它，而角色扮演最實用的用法是擋住模型替你說話 |
 | 舊版 v2.4 的 UI | **還在**。外觀上已經不是問題（分區都重做了），但那些程式碼沒清 |
 
 ---
@@ -1159,13 +1278,9 @@ client 的元件樣式        只准寫 var(--dsh-tv-*)，不准有 hex（測試
       **每房設定從來沒有生效過**（§2.6.49）。已修，測試已改成真實形狀
 - [x] 暫時酒館用完已清掉（`tavern.remove` ＋ 刪資料夾），**使用中的酒館已還原**
       成使用者自己那一間，使用者的 `tavern.json`／`room.json` 鍵一個都沒少
-- [ ] ⚠️ **還要再重啟一次 `dsh web`**（2.6.49 改了 `lib/index.js`）。
-      現在跑的是 **`tavern-2.6.48`**；重啟後應該變成 `tavern-2.6.49`。
-      **驗收一條就夠**（在 ⚙️ 房間 填溫度 → 儲存 → 開那個房間說一句話 →
-      看 `request/header` 有沒有 `temperature`），因為其他兩條在 2.6.48 就過了。
-      > 這一條會**順手自我修復**舊綁定：反查到「有 `chat` 沒有 `room`」時會補一次
-      > 帶 `room` 的綁定，所以你不必手動做任何事。
-- [ ] **2.6.46–2.6.49 還沒有 commit／push**（這台仍然沒有 `git`）。
+- [x] ~~⚠️ **還要再重啟一次 `dsh web`**（2.6.49 改了 `lib/index.js`）~~：
+      **已經重啟過了**（實測 `tavern.list` 回的 `build` 早就超過 2.6.49）。
+- [ ] **2.6.46–2.6.56 還沒有 commit／push**（這台仍然沒有 `git`）。
       ⚠️ **push 一律要先問使用者**（全域指示）。
 - [x] ~~**使用者的酒館留了一份示範對話**~~：**已經沒有了**——2026-09-18 檢查時，
       使用者那間酒館的 `chats/` 是空的，只有預設的老闆娘與世界書。
@@ -1174,6 +1289,89 @@ client 的元件樣式        只准寫 var(--dsh-tv-*)，不准有 hex（測試
       `b1b93c4` 就是 2.5.0，工作區已 `pull` 對齊。
 - [x] ~~上傳之後，重新安裝並確認三個面的版本標記都是 2.5.0~~：**已完成**，
       而且安裝方式從 tarball 改成 `link:`。
+
+**2026-09-23 這一輪（2.6.57，回覆格式的「指定」那一半）的狀態：**
+
+- [x] `npm test` **十一套全綠**（新增 `test-render.mjs`；`test-agent` 多 14、
+      `test-workspace` 多 9d、`smoke` 多 11h／11i、`test-client` 多 4s／4t 並擴充 4m／4r）
+- [x] 三個面的版本標記都升到 **2.6.57**；`files` 補了 `lib/render.js`（verify 盯著）
+- [x] ⚠️ **抓到一個真的壞掉的地方**：`data`／`choices` 兩個 kind
+      **從第一天起就不可能解析成功**（`parseStructuredLine` 對每一行都要求 `text`）
+      → 已修，`test-client.mjs` 4t 釘住
+- [x] ⚠️ **抓到一個白屏級的手誤**：`PARSE_DEFAULT_CONFIG` 被搬上去用、宣告還在下面
+      （`var` 的提升只提升宣告）→ `test-client.mjs` 第一個就抓到
+- [ ] ⚠️ **要重啟一次 `dsh web`**（這一輪改了 `lib/index.js`／`lib/agent.js`，
+      而且多了 `lib/render.js`）。現在跑的是 **`tavern-2.6.56`** 之後的版本，
+      重啟後應該是 **`tavern-2.6.57`**
+- [ ] ⚠️ **這一輪沒有在真的 GUI 裡走過一遍**（理由同 2.6.56：shell 要一個每次啟動
+      都會換的 token）。重啟後請順手看一眼 ⚙️ 設定 的「回覆格式」那一格
+      與那兩顆開關
+- [ ] **2.6.46–2.6.57 還沒有 commit／push**（這台沒有 `git`）。⚠️ **push 一律要先問。**
+
+**重啟後要驗的四件事**：
+
+```sh
+node verify-stop.mjs 3080     # ①②③ 都在這一支裡面（只讀不寫）
+```
+
+1. **宿主半換版了**：`tavern.list` 要回 `build: tavern-2.6.57`。
+2. **回覆格式真的送到模型**（**這一輪的重點**）：
+   ⚙️ 設定 → 回覆格式 選 **`structured`** → 開那間房**說一句話** →
+   `node verify-stop.mjs 3080` 看最近的 `request/header`。
+   ⚠️ **`request/header` 裡看不到系統提示**——格式指令在 messages 裡。
+   要看那一份要解 session log（`verify-stop.mjs` 的註解有教怎麼解）。
+   最省事的驗法：**看回覆本身**——`structured` 模式下模型應該吐
+   `{"kind":"speech",…}` 而不是小說。
+3. **`choices` 與 `rows` 畫得出來**：把「讓選項可以點」打開，請它給幾個選項 →
+   選項應該是**按鈕**，按下去**填進輸入框但不會送出**。
+4. **`stop` 開關**：打開「擋住它替你說話」→ 說一句話 → header 的 `stop`
+   要有四串（`\n使用者：` 等）。⚠️ 同時確認 `provider`／`model` **還在**。
+
+**2026-09-23 這一輪（2.6.56，`stop` 序列）的狀態：**
+
+- [x] `npm test` **十套全綠**（`test-samplers` 多一節、`test-workspace` 多 9c、
+      `test-agent` 多 13、`smoke` 多 11g、`test-client` 的 4m 擴充 ＋ 新增 4r）
+- [x] 三個面的版本標記都升到 **2.6.56**
+- [x] ⚠️ **發現：房間那一層的生成參數以前從來沒有測試過**（4m 只驗酒館層）
+      → 補了 `test-client.mjs` **4r**
+- [x] **客戶端半證實上線了**（不必問人）：`/plugins/events` 的 graph 裡
+      `dsh-tavern` 的 `rev=11ef05efaeb6`，抓下來的那一份與工作區的 `lib/client.js`
+      **逐位元組相同**、`node --check` 過、含 `停止序列` 與 `tavern-client-2.6.56`
+- [x] **新增驗收工具 `node verify-stop.mjs [port]`**（只讀不寫）：一個指令驗
+      「宿主半換版了沒／`stop` 這一格活著沒／模型真的收到什麼」。
+      現在跑會**照實紅**（宿主半還是 2.6.49），那正是它應該做的
+- [ ] ⚠️ **要重啟一次 `dsh web`**（這一輪改了 `lib/index.js`／`lib/agent.js`）。
+      現在跑的是 **`tavern-2.6.49`**（實測：`tavern.list` 回 `build: tavern-2.6.49`），
+      重啟後應該是 **`tavern-2.6.56`**
+- [ ] ⚠️ **這一輪沒有在真的 GUI 裡走過一遍**：客戶端那一層 shell 要一個**每次啟動
+      都會換的 token**，而 agent 手上沒有（`/` 回 `dsh web authentication required`，
+      但 `/plugins/*` 與 `/api/dsh-tavern/*` 不必）。離線那一條驗的是**元素與值**
+      （4m／4r），真瀏覽器那一條驗的是**排版**——所以下面第 2 步請你順手看一眼。
+- [ ] **2.6.46–2.6.56 還沒有 commit／push**（這台沒有 `git`）。⚠️ **push 一律要先問。**
+
+**重啟後要驗的三件事**：
+
+```sh
+node verify-stop.mjs 3080     # ① ② ③ 都在這一支裡面（只讀不寫）
+```
+
+1. **宿主半換版了**：`tavern.list` 要回 `build: tavern-2.6.56`。
+2. **`stop` 這一格真的進去了，而且看得到**：`verify-stop.mjs` 用一個**故意的壞值**
+   （17 個）問 `settings.write`——壞值**不會被寫進檔案**，所以那是唯一一個
+   「證明新欄位活著、又不留痕跡」的問法。回 `dropped` 裡有 `stop（…）` 才算過；
+   回 `unknown op` 或沒有 `dropped` 就是還沒重啟。
+   ⚠️ **順手在畫面上看一眼**（`docs/plan.md` §2.6.56 說明了為什麼這一輪沒能自己驗）：
+   ⚙️ 設定 最下面那一格**停止序列**、以及對話頁 **⚙️ 房間** 的那一格，
+   兩個都應該是一行一個的輸入框（留空＝沒有）。
+3. **模型真的收到了**：在酒館裡**說一句話**（要真的跑完一輪），再跑一次
+   `verify-stop.mjs`。它會把最近一次的 `request/header` 印出來：
+   `provider`／`model` 一定要在（被吃掉的話症狀是「選了模型卻沒生效」，
+   而它看起來像 DSH 壞了，見 §2.6.48），`stop` 只在有設的時候出現。
+   > ⚠️ 三個實測事實寫在 `verify-stop.mjs` 的註解裡，下次要讀 session log 別再踩：
+   > log 在 `~/.dsh/sessions/<工作區編碼>/<session-id>/`（**深一層**）、
+   > 一份 783KB 的 log 有 **514 個 zstd frame** 而 `zstdDecompressSync(整份)`
+   > 只回 **232 bytes**、header 在 **`data.header.config`**。
+
 
 **這一輪（2026-09-18）的未完成項：**
 

@@ -15,8 +15,10 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-const { renderCard, readCard, apply, inject, AGENT_BUILD, __clearCache, resolveBinding, resolveCardFile, TOOL_LEVELS } =
+const { renderCard, readCard, apply, inject, AGENT_BUILD, __clearCache, resolveBinding, resolveCardFile, TOOL_LEVELS, renderDirectiveFor } =
   await import('./lib/agent.js')
+
+const { STOP_PRESET } = await import('./lib/samplers.js')
 
 /**
  * ⚠️ 版本**不要寫死在測試裡**。
@@ -527,6 +529,199 @@ console.log('1. 匯出 OK — build =', AGENT_BUILD)
   console.log('9. 世界書注入 OK — constant＋關鍵字命中、拒絕時不插手、沒有綁定就放行')
 }
 
+/* --------------------- 世界書的注入位置（2.6.59）--------------------- */
+
+{
+  /**
+   * ⚠️ **這一節驗的是「另外兩個位置真的走系統提示」**，而不只是「純函式算得對」。
+   *
+   * 背景：`docs/worldbook-plan.md` 第 131 行原本寫著「DSH 只給使用者訊息
+   * 一個槓桿，所以 ST 的八種位置我們只有一種」。那**只對一半**——
+   * `ctx.systemPrompt.variable()` 的取值函式每一輪都重跑（2.6.47 的
+   * live-reload 就是靠它），所以系統提示是第二個槓桿。
+   *
+   * 這一節要證明三件事，而三件都只有接線才看得出來：
+   *   1. `system-after` 的書出現在**卡片變數**裡（＝系統提示）
+   *   2. 同一本書**不會**同時被接進使用者訊息（不然就是送兩份）
+   *   3. `in-chat` 的書照舊接在訊息尾巴（**沒有回歸**）
+   */
+  __clearCache()
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-tavern-lorepos-'))
+  const root = join(dir, '酒館')
+  const SID = 'session-lorepos-0000-1111-2222-333344445555'
+  mkdirSync(join(root, 'characters'), { recursive: true })
+  mkdirSync(join(root, '.sessions'), { recursive: true })
+  mkdirSync(join(root, 'worldbooks'), { recursive: true })
+  writeFileSync(join(root, 'characters', '酒保.json'), JSON.stringify({ name: '酒保', description: '沉默' }))
+  writeFileSync(
+    join(root, '.sessions', `${SID}.json`),
+    JSON.stringify({ sessionId: SID, character: '酒保', room: '', chat: '夜晚' }),
+  )
+  /** 三本書，三個位置。 */
+  const writeBook = (name, position, content) =>
+    writeFileSync(
+      join(root, 'worldbooks', `${name}.json`),
+      JSON.stringify({ name, position, entries: { 0: { uid: 0, comment: name, content, constant: true } } }),
+    )
+  writeBook('前面', 'system-before', '【BEFORE-LORE】')
+  writeBook('後面', 'system-after', '【AFTER-LORE】')
+  writeBook('尾巴', 'in-chat', '【CHAT-LORE】')
+
+  const listeners = new Map()
+  let cardResolver = null
+  const ctx = {
+    effect: (fn) => fn(),
+    systemPrompt: {
+      variable: (name, fn) => {
+        cardResolver = fn
+        return () => {}
+      },
+      section: () => () => {},
+      suppressRuntimeContext: () => () => {},
+    },
+    inject: () => ({ then: () => {} }),
+    on(event, listener) {
+      listeners.set(event, listener)
+      return () => {}
+    },
+  }
+  apply(ctx, { card: '', user: '' })
+  assert.equal(typeof cardResolver, 'function', '要註冊卡片變數')
+  assert.equal(listeners.has('agent/pre-step'), true, '要掛 agent/pre-step')
+  const preStep = listeners.get('agent/pre-step')
+  const agent = { id: SID, session: { header: { cwd: root } } }
+
+  // ① **先跑一次 pre-step**（那一輪的掃描文字就留在快取裡），再問卡片變數。
+  const messages = [{ id: 'm1', role: 'user', content: [{ type: 'text', text: '晚安' }], source: { kind: 'user' } }]
+  const decision = await preStep({ agent, messages, turn: 1, step: 1 }, async () => ({ kind: 'enter', messages }))
+  const injectedTail = decision.messages[0].content[0].text
+
+  // ② ⚠️ 尾巴**只有** `in-chat` 那一本——另外兩本**不可以在這裡**（不然就是送兩份）。
+  assert.ok(injectedTail.includes('【CHAT-LORE】'), 'in-chat 的書要接在訊息尾巴（沒有回歸）')
+  assert.equal(injectedTail.includes('【AFTER-LORE】'), false, '⚠️ system-after 的書**不可以**同時接在尾巴')
+  assert.equal(injectedTail.includes('【BEFORE-LORE】'), false, '⚠️ system-before 也一樣')
+
+  // ③ 卡片變數（＝系統提示）裡要有那兩本，而且順序是 before → 卡片 → after。
+  const prompt = cardResolver({ agent })
+  assert.ok(prompt.includes('【BEFORE-LORE】'), 'system-before 要在系統提示裡')
+  assert.ok(prompt.includes('【AFTER-LORE】'), 'system-after 要在系統提示裡')
+  assert.equal(prompt.includes('【CHAT-LORE】'), false, '⚠️ in-chat 的書**不可以**跑進系統提示')
+  assert.ok(
+    prompt.indexOf('【BEFORE-LORE】') < prompt.indexOf('沉默'),
+    '⚠️ `system-before` 要在角色卡**前面**（卡片的 description 是「沉默」）',
+  )
+  assert.ok(
+    prompt.indexOf('沉默') < prompt.indexOf('【AFTER-LORE】'),
+    '⚠️ `system-after` 要在角色卡**後面**',
+  )
+
+  // ④ 酒館層的預設：沒指定位置的書跟著它走（這裡把它指到 system-after）。
+  writeFileSync(join(root, 'tavern.json'), JSON.stringify({ version: 1, worldbookPosition: 'system-after' }))
+  writeFileSync(
+    join(root, 'worldbooks', '沒指定.json'),
+    JSON.stringify({ name: '沒指定', entries: { 0: { uid: 0, content: '【DEFAULT-LORE】', constant: true } } }),
+  )
+  __clearCache()
+  const prompt2 = cardResolver({ agent })
+  assert.ok(prompt2.includes('【DEFAULT-LORE】'), '⚠️ 沒指定位置的書要跟著酒館層的預設走')
+  assert.equal(
+    (await preStep({ agent, messages, turn: 1, step: 1 }, async () => ({ kind: 'enter', messages }))).messages[0].content[0].text.includes('【DEFAULT-LORE】'),
+    false,
+    '它去了系統提示就不該同時在尾巴',
+  )
+  // 預設清空 ⇒ 回到 in-chat（＝與 2.6.58 一字不差）。
+  writeFileSync(join(root, 'tavern.json'), JSON.stringify({ version: 1 }))
+  __clearCache()
+  const tail2 = (
+    await preStep({ agent, messages, turn: 1, step: 1 }, async () => ({ kind: 'enter', messages }))
+  ).messages[0].content[0].text
+  assert.ok(tail2.includes('【DEFAULT-LORE】'), '⚠️ 沒有預設時回到 in-chat（舊行為）')
+
+  // ⑤ 壞掉的世界書目錄 ⇒ 系統提示那邊原樣（不可以讓提示詞算不出來）。
+  rmSync(join(root, 'worldbooks'), { recursive: true, force: true })
+  __clearCache()
+  const bare = cardResolver({ agent })
+  assert.equal(typeof bare, 'string', '沒有世界書時還是要回得出提示詞')
+  assert.ok(bare.includes('沉默'), '而且角色卡要在')
+
+  /* ---- ⑥ ⚠️ 房間那一層真的會蓋過酒館（2.6.62）-------------------------- */
+  //
+  // 使用者：「酒館的藏書應該是有分酒館 global 以及房間，所以要有兩個設定位置」。
+  // 這一條驗的是**最後一哩**：`room.json` 的 `worldbookPosition` 有沒有真的
+  // 改變「那一本書被放在哪」——純函式測得動規則，但測不到接線。
+  mkdirSync(join(root, 'worldbooks'), { recursive: true })
+  writeBook('酒館書', null, '【TAVERN-BOOK】')
+  writeFileSync(join(root, 'tavern.json'), JSON.stringify({ version: 1, worldbookPosition: 'in-chat' }))
+  const roomDir = join(root, 'chats', '酒保', 'r-pos')
+  mkdirSync(roomDir, { recursive: true })
+  writeFileSync(join(roomDir, 'chat.jsonl'), `${JSON.stringify({ chat_metadata: {} })}\n`)
+  writeFileSync(join(root, '.sessions', `${SID}.json`), JSON.stringify({ sessionId: SID, character: '酒保', room: 'r-pos' }))
+  const withRoom = (position) => {
+    writeFileSync(
+      join(roomDir, 'room.json'),
+      JSON.stringify(position === null ? { version: 1 } : { version: 1, worldbookPosition: position }),
+    )
+    __clearCache()
+    return cardResolver({ agent })
+  }
+  // ⚠️ **酒館那一層要先確認是 in-chat**（否則下面第一條會誤判成「房間生效了」）。
+  assert.equal(
+    withRoom(null).includes('【TAVERN-BOOK】'),
+    false,
+    '房間沒指定、酒館說 in-chat ⇒ 那一本不該進系統提示',
+  )
+  // 房間指定 system-after ⇒ **蓋過酒館**，那一本跑到系統提示。
+  assert.ok(
+    withRoom('system-after').includes('【TAVERN-BOOK】'),
+    '⚠️ 房間說 system-after ⇒ 蓋過酒館的 in-chat（那一本要進系統提示）',
+  )
+  // 反向：酒館說 system-after、房間說 in-chat ⇒ 也聽房間的。
+  writeFileSync(join(root, 'tavern.json'), JSON.stringify({ version: 1, worldbookPosition: 'system-after' }))
+  assert.equal(
+    withRoom('in-chat').includes('【TAVERN-BOOK】'),
+    false,
+    '⚠️ 房間說 in-chat ⇒ 蓋過酒館的 system-after',
+  )
+  // 房間的 `null` ＝ 聽酒館的 ⇒ 回到酒館那一層（system-after）。
+  assert.ok(withRoom(null).includes('【TAVERN-BOOK】'), '房間的 null ＝ 聽酒館的（所以回到系統提示）')
+
+  /* ---- ⑦ ⚠️ 房間也可以**逐書**開／關（2.6.64）-------------------------- */
+  //
+  // 使用者：「房間也要世界書管理頁面……房間的時候其微調可以自己在整理兩層」。
+  // 這一條驗「房間關掉一本書」有沒有真的生效——而**兩條路都要驗**
+  // （系統提示那一條 ＋ 訊息尾巴那一條），因為它們是兩個不同的地方。
+  const withOverrides = (overrides) => {
+    writeFileSync(join(roomDir, 'room.json'), JSON.stringify({ version: 1, worldbookOverrides: overrides }))
+    __clearCache()
+    return cardResolver({ agent })
+  }
+  // 那一本自己沒有指定位置，房間說 system-after ⇒ 它會進系統提示。
+  assert.ok(
+    withOverrides({ 酒館書: { position: 'system-after' } }).includes('【TAVERN-BOOK】'),
+    '房間逐書指定位置 ⇒ 那一本進系統提示',
+  )
+  // 房間把它關掉 ⇒ **系統提示那一條路不該有它**。
+  assert.equal(
+    withOverrides({ 酒館書: { enabled: false } }).includes('【TAVERN-BOOK】'),
+    false,
+    '⚠️ 房間關掉的書不該在系統提示裡',
+  )
+  // 而且**訊息尾巴那一條路**也不該有它（酒館說 in-chat）。
+  writeFileSync(join(root, 'tavern.json'), JSON.stringify({ version: 1, worldbookPosition: 'in-chat' }))
+  writeFileSync(
+    join(roomDir, 'room.json'),
+    JSON.stringify({ version: 1, worldbookOverrides: { 酒館書: { enabled: false } } }),
+  )
+  __clearCache()
+  const tailAfterClose = (
+    await preStep({ agent, messages, turn: 1, step: 1 }, async () => ({ kind: 'enter', messages }))
+  ).messages[0].content[0].text
+  assert.equal(tailAfterClose.includes('【TAVERN-BOOK】'), false, '⚠️ 房間關掉的書也不該在訊息尾巴裡')
+
+  rmSync(dir, { recursive: true, force: true })
+  console.log('10. 世界書位置 OK — system-* 進系統提示、in-chat 照舊、房間蓋過酒館、房間可逐書開關')
+}
+
 /* ------------- persona：{{user}}／「你是誰」／「這間店的規則」 ------------- */
 
 {
@@ -679,7 +874,7 @@ console.log('1. 匯出 OK — build =', AGENT_BUILD)
   assert.ok(render().includes('老主顧。'), '卡片檔消失時 persona 還是要送出去')
 
   rmSync(dir, { recursive: true, force: true })
-  console.log('10. persona OK — userName／persona／店規／房間指示都進提示詞，巨集會換、留空不變')
+  console.log('11. persona OK — userName／persona／店規／房間指示都進提示詞，巨集會換、留空不變')
 }
 
 /* ---------- 酒館層級的工具等級真的讀得到（`tavernField` 的死路）---------- */
@@ -802,7 +997,7 @@ console.log('1. 匯出 OK — build =', AGENT_BUILD)
   assert.equal(seen.allow.length, allowBeforeInherit, 'inherit 要聽酒館的（酒館是 all＝不套限制）')
 
   rmSync(dir, { recursive: true, force: true })
-  console.log('11. 工具等級 OK — tavern.json 真的讀得到、白名單正確、房間蓋過酒館、不明值 fail closed')
+  console.log('12. 工具等級 OK — tavern.json 真的讀得到、白名單正確、房間蓋過酒館、不明值 fail closed')
 }
 
 /* ------------- 生成參數：agent/request 這一條真的接上了（2.6.48）------------- */
@@ -930,8 +1125,203 @@ console.log('1. 匯出 OK — build =', AGENT_BUILD)
   )
   assert.deepEqual(passthrough, DSH_CONFIG, 'R11：沒有綁定時原樣放行')
 
+  console.log('13. 生成參數 OK — agent/request 接上了、房間蓋過酒館、留空原樣、不吃掉別人的決定')
+}
+
+/* ------------- stop 序列：同一條 waterfall 真的送到請求裡（2.6.56）------------- */
+
+{
+  /**
+   * ⚠️ 為什麼 `test-samplers.mjs` 全綠還要在這裡再驗一次：那裡的 `resolveSamplers()`
+   * 是純函式，而**純函式對不代表參數會到模型**——中間還隔著「`agent/request`
+   * 有沒有把它展開進請求」。這一節驗的**只有那一格**（規則在 `test-samplers.mjs`）。
+   *
+   * 這一條與 12 節同一型：2.6.44 的 `ensureTheme()` 就是「純函式全綠、沒有人呼叫」。
+   *
+   * ⚠️ 而它這次多了一個理由：`stop` 是**第二種形狀**的欄位（清單，不是數字），
+   * 所以「前兩個會過」不能推論「這一個也會過」——`samplerRequestFields()` 對它的
+   * 判斷是另一條（要同時檢查不是 null 與長度大於 0）。
+   */
+  __clearCache()
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-tavern-stop-'))
+  const root = join(dir, '酒館')
+  const SID = 'session-stop-0000-1111-2222-333344445555'
+  const ROOM = 'r-stop'
+
+  mkdirSync(join(root, 'characters'), { recursive: true })
+  mkdirSync(join(root, '.sessions'), { recursive: true })
+  mkdirSync(join(root, 'chats', '老闆娘', ROOM), { recursive: true })
+  writeFileSync(join(root, 'characters', '老闆娘.json'), JSON.stringify({ name: '老闆娘' }))
+  writeFileSync(
+    join(root, '.sessions', `${SID}.json`),
+    JSON.stringify({ sessionId: SID, character: '老闆娘', room: ROOM, chat: '夜晚' }),
+  )
+  const writeTavern = (patch) =>
+    writeFileSync(join(root, 'tavern.json'), JSON.stringify({ version: 1, ...patch }))
+  const writeRoom = (patch) =>
+    writeFileSync(join(root, 'chats', '老闆娘', ROOM, 'room.json'), JSON.stringify({ version: 1, ...patch }))
+  writeTavern({})
+  writeRoom({})
+
+  const listeners = new Map()
+  const ctx = {
+    effect: (fn) => fn(),
+    systemPrompt: {
+      variable: () => () => {},
+      section: () => () => {},
+      suppressRuntimeContext: () => () => {},
+    },
+    inject: () => ({ then: () => {} }),
+    on(event, listener) {
+      listeners.set(event, listener)
+      return () => {}
+    },
+  }
+  apply(ctx, { card: '', user: '' })
+  const request = listeners.get('agent/request')
+  const payload = { agent: { id: SID, session: { header: { cwd: root } } }, turn: 1, step: 1 }
+  const DSH_CONFIG = { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'high' }
+  const run = async () => request(payload, () => Promise.resolve({ ...DSH_CONFIG }))
+
+  // ① 沒設 → **不可以出現 `stop`**（連 `stop: []` 都不行：那在日誌上看起來像
+  //    「有設一個空的」，而我們的意思是完全不要碰）。
+  const untouched = await run()
+  assert.deepEqual(untouched, DSH_CONFIG, '沒設定時不可以動任何欄位')
+  assert.equal('stop' in untouched, false, '⚠️ 沒設定時不可以出現 stop（連空陣列也不行）')
+
+  // ② **開關關著時，自填的 stop 也不會送出去**（2.6.57 的語意：開關是閘門）。
+  //    ⚠️ 這一條是「有人只想留著自己的清單、但把開關關掉」時的正確行為；
+  //    也是「舊的 tavern.json 只有 stop、沒有 stopEnabled」時的行為
+  //    ——**不會**突然開始送（那是這一輪最重要的向後相容）。
+  writeTavern({ stop: '使用者：\nUser:' })
+  const switchOff = await run()
+  assert.equal('stop' in switchOff, false, '⚠️ 開關沒開 ⇒ 自填的 stop 也不送（舊檔案的形狀）')
+
+  // ③ 酒館開了開關 → 送到請求裡的是**內建那幾串 ＋ 自填**。
+  writeTavern({ stop: '使用者：\nUser:', stopEnabled: true })
+  const fromTavern = await run()
+  assert.deepEqual(
+    fromTavern.stop,
+    STOP_PRESET.concat(['使用者：', 'User:']),
+    '⚠️ 開關開著 ⇒ 送內建＋自填（內建在前，順序是給讀日誌的人看的）',
+  )
+  assert.deepEqual(
+    [fromTavern.provider, fromTavern.model, fromTavern.reasoningEffort],
+    [DSH_CONFIG.provider, DSH_CONFIG.model, DSH_CONFIG.reasoningEffort],
+    '⚠️ 別人的決定要留著（同 12 節第 ② 條）',
+  )
+  // 開著但沒有自填 ⇒ 只送內建那幾串。
+  writeTavern({ stopEnabled: true })
+  const presetOnly = await run()
+  assert.deepEqual(presetOnly.stop, STOP_PRESET, '開著、沒自填 ⇒ 就送內建那幾串')
+
+  // ④ 自填的清單照樣是「房間蓋過酒館」（與溫度同一條規矩，不是聯集）。
+  writeTavern({ stopEnabled: true })
+  writeRoom({ stop: '房間的' })
+  const fromRoom = await run()
+  assert.deepEqual(
+    fromRoom.stop,
+    STOP_PRESET.concat(['房間的']),
+    '⚠️ 房間的 stop 要蓋過酒館那一組自填的，不是兩層聯集',
+  )
+
+  // ⑤ ⚠️ **房間說「關」要蓋過酒館的「開」**——三態存在的全部理由。
+  //    這一條錯了就是「我明明把這一間房關掉了，它還是在送」。
+  writeTavern({ stopEnabled: true })
+  writeRoom({ stopEnabled: false })
+  const roomOff = await run()
+  assert.equal('stop' in roomOff, false, '⚠️ 房間說關 ⇒ 連內建的都不送')
+
+  // ⑥ 房間的 `null` ＝ 聽酒館的。
+  writeTavern({ stopEnabled: true })
+  writeRoom({ stopEnabled: null })
+  const inherited = await run()
+  assert.deepEqual(inherited.stop, STOP_PRESET, '房間的 null 要退回酒館（＝開）')
+
+  // ⑦ 手改檔案寫了不合法的一組 → 當作沒設，**不可以**送出去。
+  //    （一個 200 字的 stop 送到提供方，症狀是整個請求被拒絕，而那很難懂。）
+  writeTavern({ stop: ['x'.repeat(200)], stopEnabled: true })
+  const invalid = await run()
+  assert.deepEqual(invalid.stop, STOP_PRESET, '⚠️ 自填那一組壞掉 ⇒ 只送內建的（不是整組消失）')
+
+  writeTavern({})
+  writeRoom({})
   rmSync(dir, { recursive: true, force: true })
-  console.log('12. 生成參數 OK — agent/request 接上了、房間蓋過酒館、留空原樣、不吃掉別人的決定')
+  console.log('14. stop 序列 OK — 開關真的擋得住（房間的關蓋過酒館的開）、內建＋自填、別人的決定留著')
+}
+
+/* ------------- 回覆格式的指令真的進得了提示詞（2.6.57）------------- */
+
+{
+  /**
+   * ⚠️ **這一節驗的是「指定」，而那是這一輪真正的新東西。**
+   *
+   * 客戶端早就有 `parseStructuredLine`／`parseMarkedRegions`（讀得懂結構化的一行
+   * 與標記），但**沒有任何一份提示詞告訴模型要那樣寫**——所以永遠是
+   * 「模型寫小說、我們在後面猜」，而 `choices`／`data` 這些 kind 一次都沒出現過。
+   *
+   * 這裡釘住的是那一條線：`render.json` → 提示詞。純函式（`renderDirective`）在
+   * `test-render.mjs` 驗過了，這一節只驗**有沒有接到**（2.6.44 的
+   * `ensureTheme()` 就是「純函式全綠、沒有人呼叫」那一型）。
+   */
+  __clearCache()
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-tavern-render-'))
+  const root = join(dir, '酒館')
+  mkdirSync(join(root, 'characters'), { recursive: true })
+  writeFileSync(
+    join(root, 'characters', '老闆娘.json'),
+    JSON.stringify({ name: '老闆娘', description: '掌櫃的' }),
+  )
+  const cardFile = join(root, 'characters', '老闆娘.json')
+  const writeRender = (payload) =>
+    writeFileSync(join(root, 'render.json'), JSON.stringify({ version: 1, ...payload }))
+
+  // ① 沒有 `render.json` ⇒ **一個字都不加**（這就是「既有對話行為不變」）。
+  rmSync(join(root, 'render.json'), { force: true })
+  assert.equal(renderDirectiveFor(cardFile), '', '⚠️ 沒有 render.json ⇒ 零指令')
+
+  // ② `plain` 也一樣是零指令。
+  writeRender({ mode: 'plain' })
+  assert.equal(renderDirectiveFor(cardFile), '', '⚠️ plain ⇒ 零指令')
+
+  // ③ `structured` ⇒ 指令真的出來了，而且含著 model 非知道不可的那幾句。
+  writeRender({ mode: 'structured' })
+  const structured = renderDirectiveFor(cardFile)
+  assert.match(structured, /一行一個 JSON 物件/, 'structured 的指令要出來')
+  assert.match(structured, /不要包成陣列/, '要含「不要包成陣列」')
+
+  // ④ `marked` ⇒ 列出標記。
+  writeRender({ mode: 'marked', markers: [{ tag: '台詞', kind: 'speech', who: '' }] })
+  assert.match(renderDirectiveFor(cardFile), /<台詞>/, 'marked 的指令要列出標記')
+
+  // ⑤ 壞掉的 render.json ⇒ 回預設（零指令），**不丟錯**。
+  writeFileSync(join(root, 'render.json'), '{ 這不是 JSON')
+  assert.equal(renderDirectiveFor(cardFile), '', '壞檔 ⇒ 落回 plain（零指令），不丟錯')
+
+  /**
+   * ⑥ ⚠️ **接線的最後一哩：它真的會被放進系統提示。**
+   *
+   * 上面驗的是那一支純函式，而這一條驗的是 `apply()` 有沒有**呼叫**它
+   * ——少了它，`render.json` 就是一個存得起來、完全沒有作用的檔案。
+   * 做法與 `test-client.mjs` 的 `ensureTheme(` 那條原始碼斷言同一型。
+   */
+  const source = readFileSync(new URL('./lib/agent.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+  assert.ok(
+    /const format = renderDirectiveFor\(cardFile\)/.test(source),
+    '⚠️ card variable 裡要真的呼叫 renderDirectiveFor（不然 render.json 是死的）',
+  )
+  assert.ok(
+    /if \(format !== ''\) parts\.push\(format\)/.test(source),
+    '⚠️ 而且回空字串時**不可以** push（plain 模式要零指令）',
+  )
+  assert.ok(
+    source.indexOf('renderDirectiveFor(cardFile)') < source.indexOf('tavernExtras(cardFile, names)'),
+    '格式指令要在 persona／店規**之前**（那是「請你這樣回答」，比故事背景更基礎）',
+  )
+
+  writeRender({ mode: 'plain' })
+  rmSync(dir, { recursive: true, force: true })
+  console.log('15. 回覆格式 OK — render.json → 提示詞真的接上了、plain 與壞檔都是零指令')
 }
 
 console.log('\n全部通過 ✅')

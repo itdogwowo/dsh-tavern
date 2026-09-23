@@ -1050,6 +1050,360 @@ function pngCard(entries) {
   console.log('11f. 生成參數 OK — 走真的 HTTP：數字／字串都收、null 來回、壞值回報且不覆蓋')
 }
 
+/* --- 11g. stop 序列走真的 HTTP 一圈（一整段文字要在 JSON 裡活著）----------- */
+{
+  /**
+   * 為什麼 `stop` 值得自己繞一圈真的 HTTP：它是**唯一一個「客戶端送的形狀
+   * 與存下來的形狀不一樣」**的欄位。
+   *
+   * 客戶端送的是 `<textarea>` 的**一整段文字**（`"使用者：\nUser:"`），宿主半要
+   * 把它拆成陣列再存。這一段路徑上任何一環把換行、CRLF 或跳脫弄丟，症狀都是
+   * **安靜的**：stop 存下來了、畫面也有，只是模型永遠不會在那裡停下來。
+   * `test-workspace.mjs` 驗的是函式層，這一條驗的是「經過 HTTP ＋ JSON 之後」。
+   */
+  const stopShop = mkdtempSync(join(tmpdir(), 'tavern-stop-shop-'))
+  const added = await callRpc('tavern.add', { path: stopShop })
+  const tavernId = added.value.added.id
+
+  // ① 一整段文字（**行尾故意混 CRLF 與 LF、中間夾空行與重複**）⇒ 乾淨的陣列。
+  const saved = await callRpc('settings.write', {
+    id: tavernId,
+    patch: { stop: '使用者：\r\nUser:\n\n  使用者：  ' },
+  })
+  assert.equal(saved.ok, true, 'settings.write 應該成功：' + saved.error)
+  assert.deepEqual(
+    saved.value.stop,
+    ['使用者：', 'User:'],
+    '⚠️ 一整段文字要變成陣列：拆行、trim 頭尾、去空行、去掉完全相同的',
+  )
+  assert.equal(saved.value.dropped, undefined, '合法的值不該有 dropped')
+
+  // ② 讀回來還是陣列（`settings.read` 是另一個 op，走另一條路）。
+  const read = await callRpc('settings.read', { id: tavernId })
+  assert.deepEqual(read.value.stop, ['使用者：', 'User:'], '讀回來也要是那個陣列')
+  assert.equal(Array.isArray(read.value.stop), true, '⚠️ 型別要是陣列，不是那一整段文字')
+
+  // ③ 陣列也收（`tavern.json` 是手改得到的）——而且**不動它**。
+  const asArray = await callRpc('settings.write', { id: tavernId, patch: { stop: ['A', 'A', ' B '] } })
+  assert.deepEqual(asArray.value.stop, ['A', 'B'], '陣列直接收，並且照同一條規矩正規化')
+
+  // ④ ⚠️ 清除有**兩種寫法**，而結果只能是**一種**。
+  //    `[]` 與 `null` 並存的話，讀的那一端永遠分不出「這一間是空的」與
+  //    「這一間沒有設」——而那個差別決定「要不要退回酒館那一組」。
+  const clearedByArray = await callRpc('settings.write', { id: tavernId, patch: { stop: [] } })
+  assert.equal(clearedByArray.value.stop, null, '⚠️ 空陣列要存成 null，不是 []')
+  await callRpc('settings.write', { id: tavernId, patch: { stop: ['A'] } })
+  const clearedByNull = await callRpc('settings.write', { id: tavernId, patch: { stop: null } })
+  assert.equal(clearedByNull.value.stop, null, 'null ＝ 清除')
+  const reread = await callRpc('settings.read', { id: tavernId })
+  assert.equal(reread.value.stop, null, '讀回來也要是 null')
+
+  // ⑤ 不合法 → 回報 `dropped`，**而且原本的值要活著**（同 11f 第 ④ 條）。
+  await callRpc('settings.write', { id: tavernId, patch: { stop: ['好的'] } })
+  const refused = await callRpc('settings.write', {
+    id: tavernId,
+    patch: { stop: Array.from({ length: 17 }, (_, i) => `s${i}`) },
+  })
+  assert.equal(refused.ok, true, '不合法不是「失敗」——是「這一欄沒存」（回報在 dropped）')
+  assert.deepEqual(refused.value.stop, ['好的'], '不合法的那一欄要保留原本的值')
+  assert.match(
+    String((refused.value.dropped ?? [])[0]),
+    /^stop/,
+    '要回報是 stop 被丟掉：' + JSON.stringify(refused.value.dropped),
+  )
+
+  // ⑥ 房間層：同一條路，而且 `null` ＝ 聽酒館的（清單要原樣帶出來）。
+  await callRpc('settings.write', { id: tavernId, patch: { stop: ['酒館的'] } })
+  const room = await callRpc('room.create', { id: tavernId, character: '老闆娘', name: '停止序列房' })
+  assert.equal(room.ok, true, '先開一間房：' + room.error)
+  const roomSaved = await callRpc('room.write', {
+    id: tavernId,
+    character: '老闆娘',
+    room: room.value.room,
+    patch: { stop: '房間的\n第二個' },
+  })
+  assert.deepEqual(roomSaved.value.stop, ['房間的', '第二個'], '房間的 stop 要存得進去')
+  const rooms = await callRpc('room.list', { id: tavernId, character: '老闆娘' })
+  const one = rooms.value.find((entry) => entry.room === room.value.room)
+  assert.ok(one !== undefined, '剛開的房間要在清單裡')
+  assert.deepEqual(one.stop, ['房間的', '第二個'], '⚠️ 清單要帶 stop（那一格讀的是清單）')
+  // 另一間沒設 ⇒ `null`（＝聽酒館的），不是把酒館那一組抄進來。
+  const other = await callRpc('room.create', { id: tavernId, character: '老闆娘', name: '沒設的房' })
+  const others = await callRpc('room.list', { id: tavernId, character: '老闆娘' })
+  const otherOne = others.value.find((entry) => entry.room === other.value.room)
+  assert.equal(otherOne.stop, null, '⚠️ 房間層的 null 要原樣回傳，不要填成酒館的值')
+
+  await callRpc('tavern.remove', { id: tavernId })
+  rmSync(stopShop, { recursive: true, force: true })
+  console.log('11g. stop 序列 OK — 走真的 HTTP：一整段文字變陣列、[]／null 同一種結果、壞值回報')
+}
+
+/* --- 11h. 回覆格式（render.json）走真的 HTTP 一圈 ------------------------- */
+{
+  /**
+   * 這一條驗的是**「指定」那一半真的存在**——在那之前，酒館只有「解碼」：
+   * 客戶端讀得懂結構化的一行，但沒有任何一份提示詞告訴模型要那樣寫。
+   *
+   * ⚠️ 為什麼要特地繞一圈真的 route：`render.json` 有**兩份會走散的東西**
+   *   - 宿主的 `RENDER_MODES`（驗證用）
+   *   - 客戶端的鏡射（畫畫面用）
+   * 而中間隔著 HTTP ＋ JSON。任何一環把 `markers` 那種**物件陣列**弄丟或變形，
+   * 症狀都是安靜的：檔案看起來有、畫面看起來有，只是模型永遠收不到對的指令。
+   */
+  const renderShop = mkdtempSync(join(tmpdir(), 'tavern-render-shop-'))
+  const added = await callRpc('tavern.add', { path: renderShop })
+  const tavernId = added.value.added.id
+
+  // ① 一開始沒有 render.json ⇒ 回預設（plain）。這是「既有對話行為不變」的那一格。
+  const absent = await callRpc('render.read', { id: tavernId })
+  assert.equal(absent.ok, true, 'render.read 應該成功：' + absent.error)
+  assert.equal(absent.value.exists, false, '新酒館沒有 render.json')
+  assert.equal(absent.value.render.mode, 'plain', '⚠️ 沒設定 ⇒ plain（提示詞零指令）')
+
+  // ② 寫一份進去，讀回來要**一模一樣**（含物件陣列那種形狀）。
+  const saved = await callRpc('render.write', {
+    id: tavernId,
+    patch: {
+      mode: 'structured',
+      markers: [{ tag: '台詞', kind: 'speech', who: '老闆娘' }],
+      quotes: [['《', '》']],
+      choicesClickable: true,
+    },
+  })
+  assert.equal(saved.ok, true, 'render.write 應該成功：' + saved.error)
+  assert.equal(saved.value.mode, 'structured', '模式要存下來')
+  const read = await callRpc('render.read', { id: tavernId })
+  assert.equal(read.value.exists, true, '檔案要真的落地')
+  assert.equal(read.value.render.mode, 'structured', '模式讀得回來')
+  assert.deepEqual(
+    read.value.render.markers,
+    [{ tag: '台詞', kind: 'speech', who: '老闆娘' }],
+    '⚠️ markers 是**物件陣列**，經過 JSON 之後形狀要一個字都不差',
+  )
+  assert.deepEqual(read.value.render.quotes, [['《', '》']], '引號的成對形狀也要活著')
+  assert.equal(read.value.render.choicesClickable, true, 'choicesClickable 要記得是布林')
+  // ⚠️ 它必須住在**酒館資料夾**裡（整包帶走時格式跟著走）。
+  assert.equal(
+    existsSync(join(renderShop, 'render.json')),
+    true,
+    '⚠️ render.json 要在酒館資料夾裡，不是 ~/.dsh',
+  )
+
+  // ③ 不合法 ⇒ 回報 `dropped`，而且**落回預設**（不是留著一半）。
+  const refused = await callRpc('render.write', { id: tavernId, patch: { markers: [{ tag: 'x', kind: 'nope' }] } })
+  assert.equal(refused.ok, true, '不合法不是「失敗」——是「這一欄沒存」（回報在 dropped）')
+  assert.match(
+    String((refused.value.dropped ?? [])[0]),
+    /^markers/,
+    '要回報是 markers 被丟掉：' + JSON.stringify(refused.value.dropped),
+  )
+
+  // ④ `workspace` 這個 op 要**順手帶回 render**（客戶端讀一次概要就要拿到全部）。
+  //    漏了這一條的症狀是安靜的：對話頁永遠用內建的 plain 設定。
+  const summary = await callRpc('workspace', {})
+  assert.equal(summary.ok, true, 'workspace 應該成功：' + summary.error)
+  assert.equal(
+    summary.value.render !== null && summary.value.render !== undefined,
+    true,
+    '⚠️ workspace 要帶 render（不然對話頁永遠走 plain）',
+  )
+  assert.equal(
+    typeof summary.value.render.render === 'object' && summary.value.render.render !== null,
+    true,
+    '⚠️ 形狀是 `{ exists, broken, render }`——客戶端要往下取一層',
+  )
+
+  await callRpc('tavern.remove', { id: tavernId })
+  rmSync(renderShop, { recursive: true, force: true })
+  console.log('11h. 回覆格式 OK — 走真的 HTTP：plain 預設、物件陣列活著、壞值回報、workspace 帶得回來')
+}
+
+/* --- 11i. stop 的開關走真的 HTTP 一圈 ------------------------------------- */
+{
+  // ⚠️ 開關是**三態**（`true`／`false`／`null`＝聽上一層），而 JSON 裡
+  //    `false` 與「沒有這個鍵」長得很像——那正是這一條要驗的東西：
+  //    房間說「關」要真的存成 `false`，而不是被當成「沒送」。
+  const switchShop = mkdtempSync(join(tmpdir(), 'tavern-stop-switch-'))
+  const added = await callRpc('tavern.add', { path: switchShop })
+  const tavernId = added.value.added.id
+
+  const on = await callRpc('settings.write', { id: tavernId, patch: { stopEnabled: true } })
+  assert.equal(on.value.stopEnabled, true, '酒館層的 true 要存得下去')
+  const off = await callRpc('settings.write', { id: tavernId, patch: { stopEnabled: false } })
+  assert.equal(off.value.stopEnabled, false, '⚠️ false 要存得下去（不是被當成「沒送」而落回預設）')
+
+  const room = await callRpc('room.create', { id: tavernId, character: '老闆娘', name: '開關房' })
+  await callRpc('settings.write', { id: tavernId, patch: { stopEnabled: true } })
+  const roomOff = await callRpc('room.write', {
+    id: tavernId,
+    character: '老闆娘',
+    room: room.value.room,
+    patch: { stopEnabled: false },
+  })
+  assert.equal(roomOff.value.stopEnabled, false, '⚠️ 房間層的 false 要存得下去')
+  const listed = await callRpc('room.list', { id: tavernId, character: '老闆娘' })
+  const one = listed.value.find((entry) => entry.room === room.value.room)
+  assert.equal(one.stopEnabled, false, '⚠️ 清單要帶 stopEnabled（那一格讀的是清單）')
+
+  // 三態的第三格：`null` ＝ 回到「聽上一層」。
+  const back = await callRpc('room.write', {
+    id: tavernId,
+    character: '老闆娘',
+    room: room.value.room,
+    patch: { stopEnabled: null },
+  })
+  assert.equal(back.value.stopEnabled, null, '⚠️ null ＝ 聽上一層（不是 false）')
+
+  // 壞值要回報（而且不改動原本的值）。
+  await callRpc('room.write', {
+    id: tavernId,
+    character: '老闆娘',
+    room: room.value.room,
+    patch: { stopEnabled: true },
+  })
+  const bad = await callRpc('room.write', {
+    id: tavernId,
+    character: '老闆娘',
+    room: room.value.room,
+    patch: { stopEnabled: 'on' },
+  })
+  assert.equal(bad.value.stopEnabled, true, '⚠️ 壞值不可以覆蓋原本的值')
+  assert.match(String((bad.value.dropped ?? [])[0]), /^stopEnabled/, '要回報是 stopEnabled 被丟掉')
+
+  await callRpc('tavern.remove', { id: tavernId })
+  rmSync(switchShop, { recursive: true, force: true })
+  console.log('11i. stop 開關 OK — 走真的 HTTP：三態都存得下去、false 不會被當成「沒送」、壞值回報')
+}
+
+/* --- 11j. 世界書的注入位置走真的 HTTP 一圈（2.6.59）---------------------- */
+{
+  /**
+   * ⚠️ 這一條的重點是**「只改一個欄位」**：`worldbook.position` 只動那本書的
+   * `position`，其餘（ST 的幾十個欄位）一個都不能掉。
+   *
+   * 為什麼要繞真的 HTTP：中間隔著「整本讀出來、改一格、原子寫回去」，
+   * 而任何一環把不認得的欄位弄丟，症狀都是**安靜的**——使用者只會在某一天
+   * 發現自己的世界書少了東西。
+   */
+  const posShop = mkdtempSync(join(tmpdir(), 'tavern-wbpos-'))
+  const added = await callRpc('tavern.add', { path: posShop })
+  const tavernId = added.value.added.id
+
+  const bookId = await callRpc('worldbook.write', {
+    id: tavernId,
+    payload: {
+      name: '位置測試',
+      position: 4,
+      keepMe: { nested: true },
+      entries: { 0: { uid: 0, content: 'SPEC', constant: true, token_budget: 400 } },
+    },
+  })
+  assert.equal(bookId.ok, true, '寫一本世界書：' + bookId.error)
+
+  // ① 讀：ST 的 4 映射到 in-chat，而且 `explicit` 是 true。
+  const before = await callRpc('worldbook.positions', { id: tavernId })
+  assert.equal(before.ok, true, 'worldbook.positions 應該成功：' + before.error)
+  assert.equal(before.value.fallback, '', '酒館層的預設一開始是空的')
+  const one = before.value.books.find((b) => b.id === bookId.value)
+  assert.equal(one.position, 'in-chat', 'ST 的 4 ⇒ in-chat')
+  assert.equal(one.explicit, true, '⚠️ ST 的數字是「明確指定」，不是「沒指定」')
+
+  // ② 寫：改成 system-after。
+  const moved = await callRpc('worldbook.position', { id: tavernId, book: bookId.value, where: 'system-after' })
+  assert.equal(moved.ok, true, 'worldbook.position 應該成功：' + moved.error)
+  assert.equal(moved.value.position, 'system-after', '回寫進去的值')
+
+  // ③ ⚠️ 其餘欄位**一個都不能掉**。
+  const raw = JSON.parse(readFileSync(join(posShop, 'worldbooks', `${bookId.value}.json`), 'utf8'))
+  assert.equal(raw.position, 'system-after', '位置要改到')
+  assert.deepEqual(raw.keepMe, { nested: true }, '⚠️ 不認得的頂層欄位不可以掉')
+  assert.equal(raw.entries['0'].token_budget, 400, '⚠️ 條目裡的欄位也不可以掉')
+  assert.equal(raw.entries['0'].content, 'SPEC', '內容不變')
+
+  // ④ 酒館層的預設（走 settings.write），而且不合法要回報。
+  const saved = await callRpc('settings.write', { id: tavernId, patch: { worldbookPosition: 'system-before' } })
+  assert.equal(saved.value.worldbookPosition, 'system-before', '酒館層預設存得下去')
+  const badFallback = await callRpc('settings.write', { id: tavernId, patch: { worldbookPosition: 'nope' } })
+  assert.equal(badFallback.value.worldbookPosition, 'system-before', '⚠️ 壞值不可以覆蓋原本的值')
+  assert.match(String((badFallback.value.dropped ?? [])[0]), /^worldbookPosition/, '要回報是它被丟掉')
+
+  // ⑤ 壞位置／不存在的書 ⇒ **明確報錯**（不是靜靜落回預設）。
+  const badWhere = await callRpc('worldbook.position', { id: tavernId, book: bookId.value, where: 'nope' })
+  assert.equal(badWhere.ok, false, '不合法的位置要失敗')
+  assert.match(String(badWhere.error), /位置要是/, '而且要說得出合法值：' + String(badWhere.error))
+  const noBook = await callRpc('worldbook.position', { id: tavernId, book: '不存在', where: 'in-chat' })
+  assert.equal(noBook.ok, false, '不存在的書要失敗')
+  assert.match(String(noBook.error), /找不到這本世界書/, '要說出是哪一本')
+
+  await callRpc('tavern.remove', { id: tavernId })
+  rmSync(posShop, { recursive: true, force: true })
+  console.log('11j. 世界書位置 OK — 走真的 HTTP：只改一個欄位、ST 欄位不掉、壞值報錯')
+}
+
+/* --- 11k. 世界書位置的**房間那一層**走真的 HTTP（2.6.62）----------------- */
+{
+  // ⚠️ 兩支 op 答的是**不同的問題**，而拿錯那一支會顯示錯的位置（安靜的錯）：
+  //   `worldbook.positions`     = 酒館層（📖 藏書 那一頁用）
+  //   `worldbook.roomPositions` = 這一間房（書 → 房 → 酒館 三層一起算）
+  const roomPosShop = mkdtempSync(join(tmpdir(), 'tavern-roompos-'))
+  const added = await callRpc('tavern.add', { path: roomPosShop })
+  const tavernId = added.value.added.id
+  const bookId = (
+    await callRpc('worldbook.write', {
+      id: tavernId,
+      payload: { name: '沒指定', entries: { 0: { uid: 0, content: 'X', constant: true } } },
+    })
+  ).value
+
+  await callRpc('settings.write', { id: tavernId, patch: { worldbookPosition: 'in-chat' } })
+  const room = (await callRpc('room.create', { id: tavernId, character: '老闆娘', name: '位置房' })).value.room
+
+  // ① 房間層空 ⇒ 跟著酒館。
+  const before = await callRpc('worldbook.roomPositions', { id: tavernId, character: '老闆娘', room })
+  assert.equal(before.ok, true, 'worldbook.roomPositions 應該成功：' + before.error)
+  assert.equal(before.value.room, '', '房間層一開始是空的')
+  assert.equal(before.value.tavern, 'in-chat', '讀得到酒館層')
+  assert.equal(before.value.books.find((b) => b.id === bookId).position, 'in-chat', '跟著酒館')
+
+  // ② 寫房間層 ⇒ 蓋過酒館，而且**另一支 op 不受影響**。
+  const saved = await callRpc('room.write', {
+    id: tavernId,
+    character: '老闆娘',
+    room,
+    patch: { worldbookPosition: 'system-after' },
+  })
+  assert.equal(saved.value.worldbookPosition, 'system-after', '房間層存得下去')
+  const after = await callRpc('worldbook.roomPositions', { id: tavernId, character: '老闆娘', room })
+  assert.equal(after.value.room, 'system-after', '讀得到房間層')
+  assert.equal(after.value.books.find((b) => b.id === bookId).position, 'system-after', '⚠️ 房間蓋過酒館')
+  const tavernSide = await callRpc('worldbook.positions', { id: tavernId })
+  assert.equal(
+    tavernSide.value.books.find((b) => b.id === bookId).position,
+    'in-chat',
+    '⚠️ 酒館那一支只看酒館的預設（房間的值不關它的事）',
+  )
+
+  // ③ 三態：`null` ＝ 聽酒館的。④ 壞值要回報。
+  const back = await callRpc('room.write', {
+    id: tavernId,
+    character: '老闆娘',
+    room,
+    patch: { worldbookPosition: null },
+  })
+  assert.equal(back.value.worldbookPosition, null, '⚠️ null ＝ 聽酒館的（不是一個位置）')
+  const bad = await callRpc('room.write', {
+    id: tavernId,
+    character: '老闆娘',
+    room,
+    patch: { worldbookPosition: 'nope' },
+  })
+  assert.match(String((bad.value.dropped ?? [])[0]), /^worldbookPosition/, '要回報是它被丟掉')
+
+  await callRpc('tavern.remove', { id: tavernId })
+  rmSync(roomPosShop, { recursive: true, force: true })
+  console.log('11k. 房間的藏書位置 OK — 走真的 HTTP：三態、房間蓋過酒館、兩支 op 各答各的')
+}
+
 /* --- 12. 跨半契約：瀏覽器半呼叫的每個 op 都必須存在於宿主半 ---------------- */
 {
   // 這一條是為了「＋ 新增角色」那個 bug：面板呼叫 `character.create`，

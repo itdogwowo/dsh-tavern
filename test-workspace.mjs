@@ -12,6 +12,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SUBDIRS, TavernWorkspace, requireId, resolveDshHome, segmentFromName, unwrapCard } from './lib/workspace.js'
+import { DEFAULT_MARKERS } from './lib/render.js'
 import { isPng, readCardFromPng } from './lib/pngcard.js'
 import {
   assetIdFor,
@@ -438,6 +439,186 @@ try {
       '收尾要把設定清乾淨',
     )
     console.log('9b. 生成參數 OK — 存得進 tavern.json／room.json、null ＝清除、壞值回報不寫入')
+  }
+
+  /* --- 9c. stop 序列：一行一個、正規化、壞值回報（2.6.56）----------------- */
+  {
+    /**
+     * `stop` 與 9b 那兩個欄位**不是同一種東西**，所以它值得自己一段：
+     *
+     *   - 它是一個**清單**（`string[]`），不是數字；
+     *   - 客戶端送來的是**一整段文字**（textarea，一行一個），拆行是這裡的事
+     *     ——兩邊各拆一份就會出現「面板預覽一種、實際送出另一種」；
+     *   - 「沒有設定」有**兩種寫法**（`null` 與 `[]`），而存檔只能有一種。
+     *
+     * ⚠️ 這一節同時是 `applySamplerPatch()` 的測試。那一支是 9b 那兩個欄位與
+     * `stop` **共用**的寫入路徑，所以「酒館層與房間層行為一致」在這一段順便就驗到了。
+     */
+    const ws4 = new TavernWorkspace(root)
+
+    // ① 一整段文字（客戶端真的送的形狀）⇒ 拆行、trim 頭尾、去空行、去重。
+    const saved = await ws4.writeSettings({ stop: '使用者：\r\n\r\nUser:\r\n  使用者：  ' })
+    assert.deepEqual(
+      saved.stop,
+      ['使用者：', 'User:'],
+      '一行一個：要拆行、去空行、trim 頭尾、去掉完全相同的（順序照寫的）',
+    )
+    assert.equal(saved.dropped, undefined, '合法的值不該有 dropped')
+    const onDisk = JSON.parse(await readFile(join(root, 'tavern.json'), 'utf8'))
+    assert.deepEqual(onDisk.stop, ['使用者：', 'User:'], '要是磁碟上的事實（而且是陣列）')
+    assert.equal(Array.isArray(onDisk.stop), true, '存進去的必須是陣列，不是那一整段文字')
+
+    // ② 陣列也收（`tavern.json` 是手改得到的），而且讀回來是同一份。
+    const asArray = await ws4.writeSettings({ stop: ['A', 'B'] })
+    assert.deepEqual(asArray.stop, ['A', 'B'], '陣列直接收')
+    assert.deepEqual((await ws4.readSettings()).stop, ['A', 'B'], '讀回來也要一樣')
+
+    // ③ 清除：**兩個寫法都要變成同一種結果**（`null`）。
+    //    ⚠️ 這一條是這一節的重點：`[]` 與 `null` 在 JSON 裡看起來不一樣，
+    //    但意思一樣——兩種並存就會出現「這一間是空的、那一間是沒有」的假區別。
+    const clearedEmpty = await ws4.writeSettings({ stop: [] })
+    assert.equal(clearedEmpty.stop, null, '⚠️ 空陣列要存成 null，不是 []')
+    await ws4.writeSettings({ stop: ['A'] })
+    const clearedNull = await ws4.writeSettings({ stop: null })
+    assert.equal(clearedNull.stop, null, 'null ＝ 清除')
+    assert.equal(
+      JSON.parse(await readFile(join(root, 'tavern.json'), 'utf8')).stop,
+      null,
+      '磁碟上是 null',
+    )
+
+    // ④ 不合法 → **回報**，而且不寫進檔案（同 9b 的規矩）。
+    await ws4.writeSettings({ stop: ['好的'] })
+    const tooMany = await ws4.writeSettings({
+      stop: Array.from({ length: 17 }, (_, i) => `s${i}`),
+    })
+    assert.equal(Array.isArray(tooMany.dropped), true, '不合法要回報 dropped')
+    assert.ok(tooMany.dropped[0].startsWith('stop'), '要指出是 stop：' + JSON.stringify(tooMany.dropped))
+    assert.deepEqual(tooMany.stop, ['好的'], '⚠️ 原本的值要活下來，不是被清掉')
+    const longOne = await ws4.writeSettings({ stop: ['x'.repeat(65)] })
+    assert.ok(longOne.dropped[0].startsWith('stop'), '太長的那一項也要回報')
+    assert.match(longOne.dropped[0], /64/, '而且要說出上限是幾個字')
+
+    // ⑤ 房間層：同一組行為，而且 `null` ＝ 聽酒館的（清單投影要帶得出來）。
+    await ws4.writeSettings({ stop: ['酒館的'] })
+    const made = await ws4.createRoom('甲', '停止序列房')
+    const roomSaved = await ws4.writeRoom('甲', made.room, { stop: '房間的\n第二個' })
+    assert.deepEqual(roomSaved.stop, ['房間的', '第二個'], '房間層的 stop 存得進去')
+    const roomListed = (await ws4.listRooms('甲')).find((one) => one.room === made.room)
+    assert.ok(roomListed !== undefined, '剛建的房間要在清單裡')
+    assert.equal('stop' in roomListed, true, '⚠️ 清單要帶 stop，不然「⚙️ 房間」那一格永遠是空的')
+    assert.deepEqual(roomListed.stop, ['房間的', '第二個'], '值的來源是 room.json')
+    // ⚠️ 房間沒設時回 `null`（＝聽酒館的），**不是**把酒館那一組抄進來——
+    //    抄進來的在畫面上看不出差別，但「這一間房到底有沒有自己的設定」就分不出來了。
+    const other = await ws4.createRoom('甲', '沒有停止序列的房')
+    const otherListed = (await ws4.listRooms('甲')).find((one) => one.room === other.room)
+    assert.equal(otherListed.stop, null, '房間層的 null 要原樣回傳，不要填成酒館的值')
+    // 而房間清空（送 `null`）之後也退回 null，不是空陣列。
+    const roomCleared = await ws4.writeRoom('甲', made.room, { stop: null })
+    assert.equal(roomCleared.stop, null, '房間層清空也是 null')
+
+    // 還原：後面的段落不該拿到這裡的設定。
+    await ws4.writeSettings({ stop: null })
+    assert.equal(
+      JSON.parse(await readFile(join(root, 'tavern.json'), 'utf8')).stop,
+      null,
+      '收尾要把 stop 清乾淨',
+    )
+    console.log('9c. stop 序列 OK — 一行一個拆得開、[] 與 null 都存成 null、壞值回報不寫入、清單帶得出')
+  }
+
+  /* --- 9d. stop 的開關（三態）＋ render.json（2.6.57）--------------------- */
+  {
+    /**
+     * 這一節有兩件事，而它們是同一輪加的：
+     *
+     *   1. **`stopEnabled`**：開關是**三態**（聽上一層／開／關），不是布林。
+     *      房間說「關」必須存得下去——存成布林的話 `false` 會被「只搬認得的欄位」
+     *      的規矩漏掉，症狀是「我明明把這一間房關掉了，它還是在送」。
+     *   2. **`render.json`**：回覆格式住**另一個檔案**（不是 theme.json），
+     *      而且壞檔要落回預設 ＋ 回報，不可以讓那一間酒館打不開。
+     */
+    const ws5 = new TavernWorkspace(root)
+
+    // ① 開關：酒館層。
+    const off = await ws5.writeSettings({ stopEnabled: false })
+    assert.equal(off.stopEnabled, false, '⚠️ 酒館層的 false 要存得下去（不是被當成「沒送」）')
+    assert.equal(
+      JSON.parse(await readFile(join(root, 'tavern.json'), 'utf8')).stopEnabled,
+      false,
+      '磁碟上是 false',
+    )
+    const on = await ws5.writeSettings({ stopEnabled: true })
+    assert.equal(on.stopEnabled, true, 'true 也存得下去')
+
+    // ② 房間層的**三態**：`'inherit'` 在這一行就是 `null`。
+    const made = await ws5.createRoom('甲', '開關房')
+    const roomOff = await ws5.writeRoom('甲', made.room, { stopEnabled: false })
+    assert.equal(roomOff.stopEnabled, false, '⚠️ 房間層的 false 要存得下去（蓋過酒館的開）')
+    assert.equal(
+      JSON.parse(await readFile(join(root, 'chats', '甲', made.room, 'room.json'), 'utf8')).stopEnabled,
+      false,
+      '磁碟上是 false，不是 null',
+    )
+    const roomInherit = await ws5.writeRoom('甲', made.room, { stopEnabled: null })
+    assert.equal(roomInherit.stopEnabled, null, '送 null ⇒ 回「聽酒館的」')
+    // 壞值要回報，而且**不覆蓋原本的值**。
+    await ws5.writeRoom('甲', made.room, { stopEnabled: true })
+    const roomBad = await ws5.writeRoom('甲', made.room, { stopEnabled: 'on' })
+    assert.equal(roomBad.stopEnabled, true, '⚠️ 壞值不可以覆蓋原本的值')
+    assert.ok(
+      roomBad.dropped.some((one) => one.startsWith('stopEnabled')),
+      '要回報是 stopEnabled 被丟掉：' + JSON.stringify(roomBad.dropped),
+    )
+
+    // ③ 清單投影要帶得出來（「⚙️ 房間」那一格讀的是清單）。
+    const listed = (await ws5.listRooms('甲')).find((one) => one.room === made.room)
+    assert.equal('stopEnabled' in listed, true, '⚠️ 清單要帶 stopEnabled，不然那一格永遠是空的')
+    assert.equal(listed.stopEnabled, true, '值的來源是 room.json')
+
+    // ④ `render.json`：沒那個檔案 ⇒ 預設（plain）。
+    const absent = await ws5.readRender()
+    assert.equal(absent.exists, false, '一開始沒有 render.json')
+    assert.equal(absent.render.mode, 'plain', '⚠️ 沒有檔案 ⇒ plain（＝提示詞零指令）')
+    assert.equal(absent.render.markers.length > 0, true, '預設標記組要在（切到 marked 就馬上有東西）')
+
+    // ⑤ 寫進去、讀回來（而且是**真的落在酒館資料夾裡**）。
+    const written = await ws5.writeRender({ mode: 'marked', markers: [{ tag: '台詞', kind: 'speech' }] })
+    assert.equal(written.mode, 'marked', '模式要存下來')
+    assert.equal(
+      existsSync(join(root, 'render.json')),
+      true,
+      '⚠️ render.json 要住在**酒館資料夾**裡（整包帶走時格式跟著走）',
+    )
+    const readBack = await ws5.readRender()
+    assert.equal(readBack.exists, true, '讀得回來')
+    assert.equal(readBack.render.mode, 'marked', '模式讀得回來')
+    assert.deepEqual(readBack.render.markers, [{ tag: '台詞', kind: 'speech', who: '' }], '標記讀得回來')
+
+    // ⑥ 不合法 ⇒ 回報，而且**落回預設**（不是留著一半）。
+    const badRender = await ws5.writeRender({ mode: 'marked', markers: [{ tag: 'x', kind: 'nope' }] })
+    assert.equal(badRender.mode, 'marked', '模式那一欄是合法的，要留著')
+    assert.ok(
+      badRender.dropped.some((one) => one.startsWith('markers')),
+      '要回報 markers 被丟掉：' + JSON.stringify(badRender.dropped),
+    )
+    assert.equal(
+      badRender.markers.length,
+      DEFAULT_MARKERS.length,
+      '⚠️ 不合法的那一組整組落回預設（不是留著一半，也不是變成空的）',
+    )
+
+    // ⑦ 壞檔 ⇒ 預設 ＋ `broken`，**不丟錯**（設定檔壞掉不該讓酒館打不開）。
+    await writeFile(join(root, 'render.json'), '{ 這不是 JSON')
+    const broken = await ws5.readRender()
+    assert.equal(broken.exists, true, '檔案在')
+    assert.equal(broken.broken, true, '⚠️ 要回報 broken，不可以默默用預設')
+    assert.equal(broken.render.mode, 'plain', '壞檔 ⇒ 落回 plain')
+
+    // 收尾：把 render.json 清掉，後面的段落不該拿到這裡的設定。
+    await rm(join(root, 'render.json'), { force: true })
+    await ws5.writeSettings({ stopEnabled: false, stop: null })
+    console.log('9d. 開關與回覆格式 OK — 三態存得下去、壞值不覆蓋、render.json 進得了酒館資料夾、壞檔落回預設')
   }
 
   /* --- 10. 無損往返：未知欄位一個都不能丟 --------------------------------- */
@@ -1104,6 +1285,387 @@ try {
     assert.equal(survived[2].reasoning, '', '缺 extra 時 reasoning 是空字串')
 
     console.log('17. 思考往返 OK — extra.reasoning 原樣往返，不混進正文、不留空的 extra')
+  }
+
+  /* --- 18. 世界書的注入位置（2.6.59）-------------------------------------- */
+  {
+    /**
+     * ⚠️ **這一支只改書的 `position` 一個欄位**，不是「讀出來、改一格、寫回去」。
+     * 理由：那是使用者的 ST 檔，裡面幾十個我們不認得的欄位，而
+     * 「整本送過來再寫回去」等於相信那一趟來回沒有掉東西。
+     *
+     * 所以這一節的**重點斷言是「其他欄位一個都沒動」**。
+     */
+    const ws6 = new TavernWorkspace(root)
+    const book = {
+      name: '輸出格式',
+      // ST 的一堆欄位：我們不認得，但**不准掉**。
+      entries: { 0: { uid: 0, comment: '格式', content: 'SPEC', constant: true, token_budget: 400 } },
+      unknownTopLevel: { keep: 'me' },
+      position: 4,
+    }
+    const id = await ws6.writeWorldbook('', book)
+
+    // ① 一開始：ST 的 `4` ⇒ in-chat（而且 `explicit` 是 true——它是明確的）。
+    const before = await ws6.worldbookPositions()
+    const one = before.books.find((b) => b.id === id)
+    assert.ok(one !== undefined, '清單要有這一本')
+    assert.equal(one.position, 'in-chat', 'ST 的 4 映射到 in-chat')
+    assert.equal(one.explicit, true, '⚠️ ST 的數字是「明確指定」，不是「沒指定」')
+    assert.equal(before.fallback, '', '酒館層預設一開始是空的（＝沒有指定）')
+
+    // ② 改位置 ⇒ 只有 `position` 變，其餘逐位元組保留。
+    const written = await ws6.writeWorldbookPosition(id, 'system-after')
+    assert.equal(written, 'system-after', '回寫進去的值')
+    const after = JSON.parse(await readFile(join(root, 'worldbooks', `${id}.json`), 'utf8'))
+    assert.equal(after.position, 'system-after', 'position 要改到')
+    assert.equal(after.name, '輸出格式', 'name 不可以掉')
+    assert.deepEqual(after.unknownTopLevel, { keep: 'me' }, '⚠️ 不認得的頂層欄位不可以掉')
+    assert.equal(after.entries['0'].token_budget, 400, '⚠️ 條目裡的欄位也不可以掉')
+    assert.equal(after.entries['0'].content, 'SPEC', '內容不變')
+    assert.equal(after.entries['0'].constant, true, 'constant 不變')
+
+    // ③ 酒館層的預設：書沒有指定時才用它。
+    const fallbackSaved = await ws6.writeSettings({ worldbookPosition: 'system-before' })
+    assert.equal(fallbackSaved.worldbookPosition, 'system-before', '酒館層預設存得下去')
+    const listed2 = await ws6.worldbookPositions()
+    assert.equal(listed2.fallback, 'system-before', '讀回來要看得到預設')
+    assert.equal(
+      listed2.books.find((b) => b.id === id).position,
+      'system-after',
+      '⚠️ 書自己指定了 ⇒ 蓋過酒館預設',
+    )
+    // 沒指定位置的新書 ⇒ 用酒館預設。
+    const plainId = await ws6.writeWorldbook('', { name: '沒指定', entries: { 0: { uid: 0, content: 'X' } } })
+    const listed3 = await ws6.worldbookPositions()
+    const plain = listed3.books.find((b) => b.id === plainId)
+    assert.equal(plain.position, 'system-before', '沒指定的書用酒館預設')
+    assert.equal(plain.explicit, false, '而且 `explicit` 要是 false')
+
+    // ④ 壞值：**丟錯**（不是靜靜落回預設）——這一格錯了會讓書被讀成「使用者的話」。
+    await assert.rejects(
+      () => ws6.writeWorldbookPosition(id, 'nope'),
+      /位置要是/,
+      '不合法要明確報錯',
+    )
+    await assert.rejects(
+      () => ws6.writeWorldbookPosition('不存在的書', 'in-chat'),
+      /找不到這本世界書/,
+      '不存在的書要明確報錯',
+    )
+    // 而 `writeSettings` 那一格是**回報**（dropped），不是丟錯——同生成參數的規矩。
+    const bad = await ws6.writeSettings({ worldbookPosition: 'nope' })
+    assert.equal(bad.worldbookPosition, 'system-before', '⚠️ 壞值不可以覆蓋原本的值')
+    assert.ok(
+      bad.dropped.some((x) => x.startsWith('worldbookPosition')),
+      '要回報：' + JSON.stringify(bad.dropped),
+    )
+    // 空字串是**合法**的（＝取消指定 ⇒ 回到 in-chat）。
+    const cleared = await ws6.writeSettings({ worldbookPosition: '' })
+    assert.equal(cleared.worldbookPosition, '', '空字串＝取消指定')
+    assert.equal(
+      (await ws6.worldbookPositions()).books.find((b) => b.id === plainId).position,
+      'in-chat',
+      '⚠️ 沒有預設、書也沒指定 ⇒ in-chat（＝與 2.6.58 一字不差）',
+    )
+
+    console.log('18. 世界書位置 OK — 只改一個欄位、ST 欄位不掉、書蓋過酒館、壞值回報')
+  }
+
+  /* --- 19. 驗收探針的兩條原始碼契約（2.6.58）-------------------------------- */
+  {
+    /**
+     * ⚠️ **驗證工具壞掉是「安靜的成功」**——它會回報一個看起來很正常的答案，
+     * 而那個答案是**別的東西的**。這一輪兩種都真的踩到了，所以用斷言釘住：
+     *
+     * 1. **它必須只看這一間酒館的 session。** 第一版是「所有 log 按 mtime 排序、
+     *    取最新的」，於是它報的是 `dsh-tavern` 工作區底下那個 session
+     *    ——**agent 自己講話的那一個**，不是酒館的房間。使用者看到的是
+     *    「驗證通過」，而它驗的是別人的對話。
+     * 2. **它必須是唯讀的。** 第一版用「送一個不合法值當探針」，那會寫進
+     *    使用者的 `tavern.json`（而且「不合法」的判斷會隨版本漂移）。
+     *
+     * 這兩條都只能用原始碼掃描驗（那支腳本要連真的 DSH 才跑得動），
+     * 而同一個 repo 對 `ensureTheme(` 已經有同樣形狀的斷言。
+     */
+    const probe = (await readFile(new URL('./verify-stop.mjs', import.meta.url), 'utf8')).replace(/\r\n/g, '\n')
+
+    assert.ok(
+      /const wanted = new Set\(\)/.test(probe) && /\.sessions/.test(probe) && /chat_metadata/.test(probe),
+      '⚠️ 探針要先把「這一間酒館的 session id」收集起來（`.sessions` ＋ `chat.jsonl` 的標頭），' +
+        '再拿它去過濾 log——不然它會讀到**別的** session（實測發生過）',
+    )
+    assert.ok(
+      /\.filter\(\(one\) => wanted\.size === 0 \|\|/.test(probe),
+      '⚠️ 收集到的 session id 要真的拿來 filter（收了不用等於沒收）',
+    )
+    // 唯讀：不可以有任何寫入的 op 字串。
+    for (const op of ['settings.write', 'room.write', 'render.write', 'theme.write', 'tavern.add', 'tavern.remove']) {
+      assert.equal(
+        probe.includes(`'${op}'`),
+        false,
+        `⚠️ 探針必須唯讀，不可以送 ${op}（第一版會寫進使用者的 tavern.json）`,
+      )
+    }
+    // `readdirSync` 不是 Promise：`.catch()` 會丟，而症狀是「讀不到 session log」。
+    assert.equal(
+      /readdirSync\([^)]*\)\.catch\(/.test(probe),
+      false,
+      '⚠️ `readdirSync` 回陣列不是 Promise——`.catch()` 會丟（這個坑這一支踩過兩次）',
+    )
+    // 非零結束碼只能用 `process.exitCode`（`process.exit()` 會觸發 libuv 的 assert）。
+    // ⚠️ 這一條要用**去過註解**的原始碼：那一支的註解裡**故意寫著** `process.exit()`
+    //    （解釋為什麼不可以用它），用原文會命中自己的說明文字。
+    //    `test-client.mjs` 的 `stripComments()` 就是為同一件事存在的。
+    const code = probe
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+    assert.ok(/process\.exitCode =/.test(code), '要用 process.exitCode 收尾')
+    assert.equal(
+      /(?<!Code)process\.exit\(/.test(code),
+      false,
+      '⚠️ 不可以用 process.exit()（用過 fetch 之後會觸發 libuv 的 assert）',
+    )
+
+    console.log('19. 驗收探針 OK — 只看這一間酒館的 session、唯讀、readdirSync 不用 .catch')
+  }
+
+  /* --- 20. 出貨預設的升級路徑（2.6.59）------------------------------------ */
+  {
+    /**
+     * ⚠️ **這一節是「更新了但沒變」的解藥。**
+     *
+     * 新建酒館會自動拿到出貨的預設；**既有的不會**——`seed()` 只在建立時跑一次。
+     * 所以出貨內容的修正（例如 2.6.59 多了一條「哪種內容用哪個 kind」）
+     * 到不了舊酒館，而使用者只會覺得「更新沒用」。
+     *
+     * ⚠️ **但「補」不等於「覆蓋」。** 這一節最重要的斷言全部是**否定**的：
+     * 使用者改過一個字、或多加一條，那本書就**完全不動**。
+     * 判斷方法是**逐字比對出貨版**（不是版本號——版本號在「手改之後」還是舊的，
+     * 那會讓使用者的東西被蓋掉）。
+     */
+    const { upgradeFormatBook } = await import('./lib/workspace.js')
+    const { defaultFormatWorldbook, FORMAT_INSTRUCTION, FORMAT_KIND_GUIDE } = await import('./lib/defaults.js')
+    const shipped = defaultFormatWorldbook()
+    const shippedCount = Object.keys(shipped.entries).length
+    assert.equal(shippedCount, 2, '出貨版有兩條：格式 ＋ 哪種內容用哪個 kind')
+    assert.equal(
+      shipped.position,
+      'system-after',
+      '⚠️ 出貨的格式書放在**系統提示**（角色卡後面）——模型才不會把它讀成使用者的話',
+    )
+
+    // ① 舊原版（只有格式那一條）⇒ 升級，而且是**逐條**升級（不需要使用者做任何事）。
+    const legacy = {
+      name: '輸出格式',
+      entries: { 0: { uid: 0, comment: '輸出格式（酒館模式）', content: FORMAT_INSTRUCTION, constant: true, order: 999 } },
+    }
+    const up = upgradeFormatBook(JSON.stringify(legacy), shipped)
+    assert.ok(up !== null, '沒改過的原版要被升級（不然「更新了但沒變」）')
+    assert.equal(Object.keys(up.entries).length, 2, '要補上第二條')
+    assert.equal(up.position, 'system-after', '要帶上新的位置')
+    const contents = Object.values(up.entries).map((one) => one.content)
+    assert.ok(contents.includes(FORMAT_KIND_GUIDE), '補上的就是「哪種內容用哪個 kind」')
+    assert.equal(up.entries['0'].uid, 0, '⚠️ uid 要保留（`collectLore` 用它決勝負）')
+    assert.equal(up.entries['0'].comment, '輸出格式（酒館模式）', '標題保留')
+
+    // ② 使用者**改過一個字** ⇒ 完全不動。
+    const edited = JSON.parse(JSON.stringify(legacy))
+    edited.entries['0'].content = edited.entries['0'].content + '\n我自己加的'
+    assert.equal(upgradeFormatBook(JSON.stringify(edited), shipped), null, '⚠️ 改過就不升級')
+
+    // ③ 使用者**多加一條** ⇒ 完全不動。
+    const extra = JSON.parse(JSON.stringify(legacy))
+    extra.entries['1'] = { uid: 1, content: '我的東西' }
+    assert.equal(upgradeFormatBook(JSON.stringify(extra), shipped), null, '⚠️ 多一條就不升級')
+
+    // ④ **只改了標題** ⇒ 還是升級（標題不是內容，不該讓整本書停止升級），
+    //    而且那個標題要留著。
+    const renamed = JSON.parse(JSON.stringify(legacy))
+    renamed.entries['0'].comment = '我的格式說明'
+    const renamedUp = upgradeFormatBook(JSON.stringify(renamed), shipped)
+    assert.ok(renamedUp !== null, '只改標題 ⇒ 還是升級')
+    assert.equal(renamedUp.entries['0'].comment, '我的格式說明', '⚠️ 標題要留著（那是使用者的字）')
+
+    // ⑤ 頂層多了不認得的鍵 ⇒ 不動。
+    const withExtraKey = JSON.parse(JSON.stringify(legacy))
+    withExtraKey.未知的鍵 = 1
+    assert.equal(upgradeFormatBook(JSON.stringify(withExtraKey), shipped), null, '⚠️ 有額外的頂層鍵就不動')
+
+    // ⑥ 壞檔 ⇒ 不動（不丟錯）。
+    assert.equal(upgradeFormatBook('{ 壞', shipped), null, '壞檔不丟錯')
+    assert.equal(upgradeFormatBook('null', shipped), null, 'null 不丟錯')
+    assert.equal(upgradeFormatBook(JSON.stringify({ entries: {} }), shipped), null, '空的 entries 不動')
+
+    // ⑦ **幂等**：升級過的再跑一次**什麼都不做**。
+    //    ⚠️ 這一條是實測抓到的：第一版會回一個「內容一樣但物件不同」的結果，
+    //    於是使用者按「補上預設內容」時畫面說「已更新」而實際上什麼都沒變
+    //    ——那比不做事更糟，因為它讓「有沒有做事」失去意義。
+    assert.equal(
+      upgradeFormatBook(JSON.stringify(up), shipped),
+      null,
+      '⚠️ 已經是最新版 ⇒ 回 null（＝不必寫檔、也不必回報更新）',
+    )
+
+    // ⑧ `repairDefaults()` 走真的檔案：沒有檔案時建、建完再跑一次說「沒有東西要補」。
+    const ws7 = new TavernWorkspace(join(root, 'repair-shop'))
+    await ws7.ensure()
+    const first = await ws7.repairDefaults()
+    assert.equal(first.changed.length, 1, '第一次要建那一本：' + JSON.stringify(first.changed))
+    assert.ok(existsSync(join(root, 'repair-shop', 'worldbooks', '輸出格式.json')), '檔案要真的落地')
+    const secondRun = await ws7.repairDefaults()
+    assert.deepEqual(secondRun.changed, [], '⚠️ 第二次沒有東西要補（**不可以假裝做了事**）')
+    // 改了它之後再跑 ⇒ 進 `skipped`（保留），不是 `changed`。
+    const path2 = join(root, 'repair-shop', 'worldbooks', '輸出格式.json')
+    const mine = JSON.parse(await readFile(path2, 'utf8'))
+    mine.entries['0'].content = '我自己寫的格式'
+    await writeFile(path2, JSON.stringify(mine, null, 2))
+    const third = await ws7.repairDefaults()
+    assert.deepEqual(third.changed, [], '⚠️ 改過之後不可以再改它')
+    assert.equal(third.skipped.length, 1, '而且要說「你改過它，原樣保留」：' + JSON.stringify(third.skipped))
+
+    console.log('20. 預設升級 OK — 沒改過才升級、改一個字就不動、幂等、壞檔不丟錯')
+  }
+
+  /* --- 21. 世界書位置的**房間那一層**（2.6.62）--------------------------- */
+  {
+    /**
+     * 使用者：「酒館的藏書應該是有分酒館 global 以及房間，所以要有**兩個**設定
+     * 位置，現在只有酒館沒能在房間中仔細設定」。
+     *
+     * ⚠️ 這一節的重點是**優先序**（書 → 房 → 酒館）與**三態**
+     * （`null` ＝ 聽酒館的，不是一個位置）。
+     */
+    const ws8 = new TavernWorkspace(join(root, 'roompos-shop'))
+    const bookId = await ws8.writeWorldbook('', {
+      name: '沒指定位置的書',
+      entries: { 0: { uid: 0, content: 'X', constant: true } },
+    })
+    const fixedId = await ws8.writeWorldbook('', {
+      name: '自己指定位置的書',
+      position: 'system-before',
+      entries: { 0: { uid: 0, content: 'Y', constant: true } },
+    })
+    const room = (await ws8.createRoom('甲', '位置房')).room
+
+    // ① 只有酒館層 ⇒ 沒指定的書用酒館的（自己指定的那本除外）。
+    await ws8.writeSettings({ worldbookPosition: 'in-chat' })
+    const l1 = await ws8.roomWorldbookPositions('甲', room)
+    assert.equal(l1.tavern, 'in-chat', '讀得到酒館層')
+    assert.equal(l1.room, '', '房間層一開始是空的')
+    assert.equal(l1.books.find((b) => b.id === bookId).position, 'in-chat', '沒指定的用酒館的')
+    assert.equal(l1.books.find((b) => b.id === fixedId).position, 'system-before', '⚠️ 書自己指定的最優先')
+
+    // ② 房間層蓋過酒館。
+    const saved = await ws8.writeRoom('甲', room, { worldbookPosition: 'system-after' })
+    assert.equal(saved.worldbookPosition, 'system-after', '房間層存得下去')
+    const l2 = await ws8.roomWorldbookPositions('甲', room)
+    assert.equal(l2.room, 'system-after', '讀得到房間層')
+    assert.equal(
+      l2.books.find((b) => b.id === bookId).position,
+      'system-after',
+      '⚠️ 房間蓋過酒館（酒館說 in-chat）',
+    )
+    assert.equal(
+      l2.books.find((b) => b.id === fixedId).position,
+      'system-before',
+      '⚠️ 書自己指定仍然最優先（房間蓋不過它）',
+    )
+
+    // ③ **三態**：`null` ＝ 聽酒館的（不是一個位置）。
+    const back = await ws8.writeRoom('甲', room, { worldbookPosition: null })
+    assert.equal(back.worldbookPosition, null, '送 null ⇒ 回「聽酒館的」')
+    assert.equal(
+      (await ws8.roomWorldbookPositions('甲', room)).books.find((b) => b.id === bookId).position,
+      'in-chat',
+      '回到聽酒館的之後，又變回酒館那一層的值',
+    )
+
+    // ④ 壞值要回報，而且**不覆蓋原本的值**。
+    await ws8.writeRoom('甲', room, { worldbookPosition: 'system-after' })
+    const bad = await ws8.writeRoom('甲', room, { worldbookPosition: 'nope' })
+    assert.equal(bad.worldbookPosition, 'system-after', '⚠️ 壞值不可以覆蓋原本的值')
+    assert.ok(
+      bad.dropped.some((x) => x.startsWith('worldbookPosition')),
+      '要回報：' + JSON.stringify(bad.dropped),
+    )
+
+    // ⑤ 清單的投影要帶得出來（「⚙️ 房間」那一格讀的是清單）。
+    const listed = (await ws8.listRooms('甲')).find((one) => one.room === room)
+    assert.equal('worldbookPosition' in listed, true, '⚠️ 清單要帶 worldbookPosition')
+    assert.equal(listed.worldbookPosition, 'system-after', '值是 room.json 的')
+
+    // ⑥ ⚠️ 酒館那一支（`worldbookPositions`）**不可以**把房間的值算進去
+    //    ——那兩支答的是不同的問題。
+    const tavernSide = await ws8.worldbookPositions()
+    assert.equal(
+      tavernSide.books.find((b) => b.id === bookId).position,
+      'in-chat',
+      '⚠️ 酒館層那一支只看酒館的預設（房間的值不關它的事）',
+    )
+
+    console.log('21. 房間的藏書位置 OK — 三態、房間蓋過酒館、書最優先、兩支 op 答不同的問題')
+  }
+
+  /* --- 22. 房間對個別世界書的覆寫（2.6.64）------------------------------- */
+  {
+    const ws9 = new TavernWorkspace(join(root, 'bookover-shop'))
+    const keep = await ws9.writeWorldbook('', { name: '留著', entries: { 0: { uid: 0, content: 'K', constant: true } } })
+    const drop = await ws9.writeWorldbook('', { name: '關掉', entries: { 0: { uid: 0, content: 'D', constant: true } } })
+    const room = (await ws9.createRoom('甲', '覆寫房')).room
+
+    // ① 預設是空的（＝既有房間的行為不變）。
+    const l0 = await ws9.roomWorldbookPositions('甲', room)
+    assert.deepEqual(l0.overrides, {}, '一開始沒有覆寫')
+    assert.equal(l0.books.every((one) => one.enabled === true), true, '每一本都算「有在用」')
+    assert.equal(l0.books.every((one) => one.overridden === false), true, '而且都沒有被碰過')
+
+    // ② 關掉一本 ⇒ 清單要看得出「這一間房關掉了它」。
+    const saved = await ws9.writeRoom('甲', room, { worldbookOverrides: { [drop]: { enabled: false } } })
+    assert.deepEqual(saved.worldbookOverrides, { [drop]: { enabled: false } }, '覆寫存得下去')
+    const l1 = await ws9.roomWorldbookPositions('甲', room)
+    assert.equal(l1.books.find((b) => b.id === drop).enabled, false, '⚠️ 清單要說得出「關掉了」')
+    assert.equal(l1.books.find((b) => b.id === drop).overridden, true, '而且要有被碰過的記號')
+    assert.equal(l1.books.find((b) => b.id === keep).enabled, true, '另一本不受影響')
+    // ⚠️ 書的檔案**一個字都不可以被改**。
+    assert.equal(
+      JSON.parse(await readFile(join(root, 'bookover-shop', 'worldbooks', `${drop}.json`), 'utf8')).entries['0'].content,
+      'D',
+      '⚠️ 房間的覆寫不可以改到書本身',
+    )
+
+    // ③ 位置覆寫。
+    await ws9.writeRoom('甲', room, { worldbookOverrides: { [keep]: { position: 'system-after' } } })
+    const l2 = await ws9.roomWorldbookPositions('甲', room)
+    assert.equal(l2.books.find((b) => b.id === keep).position, 'system-after', '位置覆寫生效')
+    assert.equal(l2.overrides[keep].position, 'system-after', '而且讀得回原始覆寫')
+
+    // ④ **不認得的書要回報**（打錯一個字會留下一筆永遠不生效的設定）。
+    const bad = await ws9.writeRoom('甲', room, { worldbookOverrides: { 不存在的書: { enabled: false } } })
+    assert.ok(
+      bad.dropped.some((x) => x.includes('沒有這本世界書')),
+      '⚠️ 不認得的書要回報：' + JSON.stringify(bad.dropped),
+    )
+    assert.deepEqual(bad.worldbookOverrides, {}, '而且不可以留下那一筆')
+
+    // ⑤ **不合法的位置**要回報，也不能留半筆。
+    const badPos = await ws9.writeRoom('甲', room, { worldbookOverrides: { [keep]: { position: 'nope' } } })
+    assert.ok(
+      badPos.dropped.some((x) => x.includes(keep)),
+      '不合法位置要回報：' + JSON.stringify(badPos.dropped),
+    )
+    assert.deepEqual(badPos.worldbookOverrides, {}, '不合法就不留那一筆')
+
+    // ⑥ `enabled: true` 與「沒有這一項」意思一樣 ⇒ 不寫進檔案。
+    const neutral = await ws9.writeRoom('甲', room, { worldbookOverrides: { [keep]: { enabled: true } } })
+    assert.deepEqual(neutral.worldbookOverrides, {}, '⚠️ `enabled: true` 不該留下一筆沒有作用的設定')
+
+    // ⑦ 送 `null` ⇒ 整份清掉。
+    await ws9.writeRoom('甲', room, { worldbookOverrides: { [keep]: { enabled: false } } })
+    const cleared = await ws9.writeRoom('甲', room, { worldbookOverrides: null })
+    assert.deepEqual(cleared.worldbookOverrides, {}, 'null ＝ 全部還原成酒館那一層')
+
+    console.log('22. 房間的逐書覆寫 OK — 存得下去、清單看得到、書不被改到、不認得的書會回報')
   }
 
   console.log('\n全部通過 ✅')
