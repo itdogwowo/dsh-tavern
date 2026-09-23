@@ -1,6 +1,6 @@
 {
   "name": "dsh-tavern",
-  "version": "2.6.42",
+  "version": "2.6.45",
   "description": "酒館模式：一間酒館＝一個你選的資料夾。新增時在裡面建立人物卡／世界書／對話／設定的結構，UI 只讀寫這些檔案",
   "license": "MIT",
   "author": "itdogwowo",
@@ -26,6 +26,7 @@
     "lib/preset.js",
     "lib/theme.js",
     "lib/worldbook.js",
+    "samples/characters/老闆娘.png",
     "cordis.patch.yml",
     "dsh.plugin.json",
     "README.md",

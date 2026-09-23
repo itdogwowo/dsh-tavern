@@ -1,7 +1,7 @@
 {
   "name": "dsh-tavern",
   "description": "酒館模式：一間酒館＝一個你選的資料夾。新增時在裡面建立人物卡／世界書／對話／設定的結構",
-  "version": "2.6.42",
+  "version": "2.6.45",
   "entry": {
     "name": "dsh-tavern",
     "inject": []

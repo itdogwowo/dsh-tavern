@@ -11,7 +11,8 @@ import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { SUBDIRS, TavernWorkspace, requireId, resolveDshHome, segmentFromName } from './lib/workspace.js'
+import { SUBDIRS, TavernWorkspace, requireId, resolveDshHome, segmentFromName, unwrapCard } from './lib/workspace.js'
+import { isPng, readCardFromPng } from './lib/pngcard.js'
 import {
   assetIdFor,
   assetOwner,
@@ -497,11 +498,80 @@ try {
     const seedWs = new TavernWorkspace(seedRoot)
 
     const created = await seedWs.seed()
-    assert.deepEqual(
-      created.sort(),
-      ['characters/老闆娘.json', 'worldbooks/輸出格式.json', 'worldbooks/酒館.json'],
-      '應該回報實際建立了這三樣：' + created.join(', '),
+    // 房間的 id 是隨機的，所以先把它挑出來、其餘照順序比對。
+    const roomEntry = created.filter((item) => /^chats\//.test(item))
+    assert.equal(roomEntry.length, 1, '新酒館要附**一間**可以直接聊的房間：' + created.join(', '))
+    assert.match(
+      roomEntry[0],
+      /^chats\/老闆娘\/[a-z0-9]+-[a-z0-9]+\/chat\.jsonl$/,
+      '房間路徑要是 chats/<角色>/<房間 id>/chat.jsonl：' + roomEntry[0],
     )
+    assert.deepEqual(
+      created.filter((item) => !/^chats\//.test(item)).sort(),
+      ['characters/老闆娘.png', 'custom.css', 'worldbooks/輸出格式.json', 'worldbooks/酒館.json'],
+      '應該回報實際建立了這些（預設角色是 PNG 卡）：' + created.join(', '),
+    )
+    // 預設房間：room.json ＋ chat.jsonl（標頭）＋ 開場白（卡片的 first_mes）
+    const roomId = roomEntry[0].split('/')[2]
+    const roomSettings = JSON.parse(
+      await readFile(join(seedRoot, 'chats', '老闆娘', roomId, 'room.json'), 'utf8'),
+    )
+    assert.match(roomSettings.name, /^老闆娘-[a-z0-9]+$/, '沒給名字時 createRoom 會補上隨機尾巴')
+    const seededMessages = await seedWs.readRoomMessages('老闆娘', roomId)
+    assert.equal(seededMessages.length, 1, '預設房間要有一則開場白')
+    assert.equal(seededMessages[0].isUser, false, '開場白是角色說的')
+    assert.ok(seededMessages[0].text.length > 10, '開場白要有內容')
+
+    /**
+     * 預設角色**就是那張 PNG 卡**（使用者：「留意他的提示詞要寫進 PNG 卡片當中」
+     * ＋「PNG 卡直接就是卡」）：`characters/老闆娘.png` 逐位元組等於出貨檔，
+     * 提示詞住在它的 `ccv3` 裡，而同一張圖就是她的立繪。
+     */
+    const sampleCardBytes = await readFile(
+      new URL('./samples/characters/老闆娘.png', import.meta.url),
+    )
+    assert.equal(isPng(sampleCardBytes), true, '出貨檔要是一張 PNG')
+    const fromPng = unwrapCard(readCardFromPng(sampleCardBytes).card)
+    const seededBytes = await readFile(join(seedRoot, 'characters', '老闆娘.png'))
+    assert.deepEqual(seededBytes, sampleCardBytes, '種子卡要逐位元組等於出貨的那張 PNG')
+    assert.equal(
+      await stat(join(seedRoot, 'characters', '老闆娘.json')).then(() => true).catch(() => false),
+      false,
+      'PNG 卡就是卡，不要再寫一份 JSON（兩份真相）',
+    )
+    const seededCard = await seedWs.readCharacter('老闆娘')
+    assert.equal(seededCard.description, fromPng.description, '提示詞要從 PNG 裡讀出來')
+    assert.equal(seededCard.first_mes, seededMessages[0].text, '房間的開場白就是卡片的 first_mes')
+    const arts = await seedWs.describeEntityAssets('character', '老闆娘')
+    assert.equal(arts.items.length, 1, '預設角色要有一張圖（卡片本體）')
+    assert.equal(arts.items[0].name, '老闆娘.png', '就是那張 PNG 卡本身')
+    assert.equal(arts.items[0].source, 'card', '在清單裡標成 card（不是插圖，客戶端不給刪）')
+    assert.equal(arts.primary, '老闆娘.png', '而且要是主圖（海報牆／訊息頭像都用它）')
+
+    // 「裝修」的入口：一份**整份註解掉**的 custom.css 範本。
+    // 沒有它，這一層功能只存在於 README（使用者得先知道有這個檔案才用得下去）；
+    // 有它則代價是零——範本裡沒有一條生效的規則。
+    const cssTemplate = await readFile(join(seedRoot, 'custom.css'), 'utf8')
+    assert.match(cssTemplate, /theme\.json/, '範本要告訴使用者「能改 token 就先改 token」')
+    assert.match(cssTemplate, /@scope/, '範本要說明它會被 @scope 包住（碰不到宿主）')
+    assert.match(cssTemplate, /\.dsh-tv-bubble/, '範本要列出常用類別，不然使用者不知道要寫什麼')
+    assert.deepEqual(
+      cssTemplate
+        .split('\n')
+        .filter((line) => line.trim() !== '')
+        .filter((line) => !/^\s*(\/\*|\*)/.test(line)),
+      [],
+      '範本裡不可以有生效的規則（附了就不該改變外觀）',
+    )
+
+    // 酒館資料夾裡的 README.txt 也要跟著現況（房間＝資料夾、附件、裝修）——
+    // 它是使用者打開資料夾時唯一會看到的說明。
+    const readme = await readFile(join(seedRoot, 'README.txt'), 'utf8')
+    assert.match(readme, /room\.json/, 'README 要寫出房間＝資料夾的現況')
+    assert.match(readme, /files\//, 'README 要提到附件（files/）')
+    assert.match(readme, /custom\.css/, 'README 要提到裝修那一層')
+    assert.match(readme, /PNG 卡/, 'README 要說明 PNG 卡（提示詞住在圖裡）')
+    assert.doesNotMatch(readme, /chats\/<角色>\/<對話名>\.jsonl/, '舊的「一個 .jsonl 一份對話」寫法不該還在')
 
     // 輸出格式是**預設**，不是選配：沒有它模型就吐普通小說（解析器只剩推斷）。
     // 而且它必須是 `constant` ＋ 大 `order`——被預算擠掉就等於模型不知道格式。

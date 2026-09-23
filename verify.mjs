@@ -18,7 +18,7 @@ import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
 import { extname, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { readCardFromPng } from './lib/pngcard.js'
-import { sampleCard } from './lib/defaults.js'
+import { DEFAULT_CHARACTER_ID, sampleCard } from './lib/defaults.js'
 
 const root = resolve(import.meta.dirname)
 let failures = 0
@@ -151,6 +151,20 @@ if (existsSync(agentPath)) {
   const listed = new Set(Array.isArray(manifest.files) ? manifest.files : [])
   const unlisted = hostFiles.filter((name) => !listed.has('lib/' + name))
   check('files 涵蓋 lib/ 底下每個 .js', unlisted.length === 0, unlisted.map((n) => 'lib/' + n).join(', '))
+
+  /**
+   * 出貨的範例卡也**一定要在 `files` 裡**。
+   *
+   * 新酒館的預設角色（老闆娘）是**從那張 PNG 讀出來的**（提示詞住在卡片的 `ccv3` 裡），
+   * 而它同時是她的立繪。少了它，安裝版的新增酒館只會退回「沒有圖的純資料」——
+   * 功能還在，但預設卡片不再是出貨的那一張，而且**在本機完全看不出來**
+   * （`link:` 安裝時檔案就在那裡，跟上面那條漏檔案的症狀一模一樣）。
+   */
+  check(
+    'files 涵蓋出貨的範例卡（預設角色從它讀出來）',
+    listed.has(`samples/characters/${DEFAULT_CHARACTER_ID}.png`),
+    `samples/characters/${DEFAULT_CHARACTER_ID}.png`,
+  )
 }
 
 /* --- 版本標記：確認裝到的是這一版 ---------------------------------------- */

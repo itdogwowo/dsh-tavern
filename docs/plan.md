@@ -31,7 +31,7 @@ DSH 有能力但沒有角色扮演的前台。這個插件是把兩邊接起來�
 
 | | |
 |---|---|
-| 版本 | **2.6.42**（訊息附件：圖片／檔案）。**還沒 commit**——這台沒有 git；GitHub `main` 上還是 2.5.0 |
+| 版本 | **2.6.45**（PNG 卡直接就是卡 ＋ 新酒館預設 ＋ 裝修接回來）。**還沒 commit**——這台沒有 git；GitHub `main` 上還是 2.5.0 |
 | 測試 | `npm test` **九套全綠**（`verify` / `test-pngcard` / `test-worldbook` / `test-agent` / `test-preset` / `smoke` / `test-workspace` / `test-registry` / `test-client`）|
 | 架構 | **三個面全部實作完成**：宿主半、瀏覽器半、**Agent 面** |
 | 規範 | 12 條（R1–R13），**每一條都有測試釘住** |
@@ -40,7 +40,115 @@ DSH 有能力但沒有角色扮演的前台。這個插件是把兩邊接起來�
 | UI | **五個分區**：🏠 大廳／💬 包廂／🎭 卡司／📖 藏書／**⚙️ 設定**。對話頁**四個分頁**：💬 對話／🖼️ 插圖／**⚙️ 房間**／**📄 檔案** |
 | 儲存 | **一間房＝一個資料夾**（`chats/<角色>/<roomId>/{room.json,chat.jsonl,art/,files/}`），身分是 `roomId`，改名不動路徑。設計：`docs/room-layout.md` |
 | 酒館 | 一間（使用者自己選的資料夾）|
-| ⚠️ 待辦 | **宿主半還沒重啟**（`file.write`／`file.list`／`file.delete` ＋ 附件路由 ＋ `extra.media`）——重啟之後附件才會**留在房間裡**、重新整理才畫得出來 |
+| 對話框 | ✅ 模型 chip（顯示名稱 ＋ 思考強度）、選單、全新的房也能選（順手開 session）、等級會收斂。**2.6.43** |
+
+### 2.6.45 這一輪（PNG 卡直接就是卡）
+
+使用者：「提示詞住在 PNG 裡，我這裡指的是**酒館角色卡的寫法**」→
+「PNG 卡直接就是卡（讀得到、寫得回去）」。完整說明在 `CHANGELOG.md` 的 2.6.45。
+
+1. **`characters/<id>.png` 是第一級的卡**：`cardFileOf(id)` 是唯一判斷點
+   （`.json` 優先，其次 `.png`），`listCharacters`／`readCharacter`／`writeCharacter`／
+   `deleteCharacter` **全部走它**——所以「寫回同一種形式」是一條規則，不是四處各自判斷。
+2. ⚠️ **`replaceCardInPng()` 是必需的，不是重構**：`writeCardIntoPng` 是「接上去」，
+   而讀取端 `ccv3` 優先 → 對已經有 `ccv3` 的圖再寫 `chara`，**讀回來還是舊的**
+   （改了卡、看起來成功、其實沒生效）。測試同時釘「卡片區塊只有一個」與
+   「非 tEXt 位元組完全相同」。
+3. **卡片本體就是立繪**：`describeEntityAssets('character', …)` 把它當成
+   `source: 'card'` 的項目**加在最後**（既有插圖永遠優先），走新的
+   `/api/dsh-tavern/card/<id>` 路由；客戶端因此不必為 PNG 卡多寫一條路徑，
+   而它在插圖管理器裡**沒有刪除鈕**（那不是 `art/` 底下的東西）。
+4. **匯入不轉檔**：PNG → 位元組原封不動存成 `characters/<id>.png`（不再寫 `originals/`
+   與 `art/`）；**撞名自動編號**（照 ST 的規矩，那是使用者的檔案）。
+5. **新建酒館的預設老闆娘就是那張 PNG 卡**（逐位元組複製出貨檔）——「提示詞住在 PNG 裡」
+   在預設角色上也是真的，不是只有匯入的卡。
+6. ⚠️ 血的教訓：`README_TEXT` 這個 template literal 裡**不可以出現反引號**
+   （我寫了 `` `.json` `` → 整份 `workspace.js` 語法壞掉，`verify` 的
+   「host 半可 import」第一個紅）。要標記檔名就用「」或直接寫。
+
+### 2.6.44 這一輪（新酒館／新房間的預設 ＋ 裝修接回來）
+
+使用者：「我們不是應該有一個新房間預設的嗎？還有就是酒館老闆娘應該也有一個預設，
+他連同圖片也一起是預設的，留意他的提示詞要寫進 PNG 卡片當中」
+＋「我的意思是新酒館和新房間都應該要有一個預設，預設 css、預設卡片」。
+
+**一句話**：新建酒館現在是「一位有臉的老闆娘 ＋ 兩本世界書 ＋ 一間可以直接聊的房間
+＋ 一份裝修範本」，而 `theme.json`／`custom.css` 也終於真的會生效了。
+
+1. ⚠️ **`ensureTheme()` 從來沒有被呼叫過** → `theme.read` → `applyTheme` →
+   `applyCustomCss` 整條鏈是死的：`theme.json` 改了沒反應、`custom.css` 那一層
+   `<style>` 永遠是空的。**純函式測試全綠、宿主 op 也在，只有「有沒有人呼叫」沒被釘住**
+   （當時的驗證是「在 devtools 手改 token 那一層」，證明的是 CSS 變數會生效）。
+   現在兩個地方呼叫（`ensureTheme` 自己按酒館 id 去重）：`TavernStreet` 的清單讀完
+   （比主面板早）＋ `loadTavernData`（`tavern.list` 回來就套）。
+   測試：`test-client.mjs` 14k 掃「`ensureTheme(` 至少兩個呼叫點」——**這一條要留著**。
+2. **預設角色＝出貨的 PNG 卡**：`seedDefaultCard()` 讀
+   `samples/characters/老闆娘.png` 的 `ccv3` 產生 `characters/老闆娘.json`，
+   並把同一張 PNG 複製成 `art/characters/老闆娘/老闆娘.png`（主圖）。
+   → **提示詞只有一份真相（卡片）**，而且預設角色有臉。
+   ⚠️ 出貨檔不在時退回 `defaultCharacter()`（純資料、沒有圖），**不可以讓新增酒館失敗**。
+   `package.json` 的 `files` 已補 `samples/characters/老闆娘.png`，`verify.mjs` 盯著它
+   （漏掉在 `link:` 安裝時完全看不出來）。
+3. **預設房間**：`seed()` 順手 `createRoom(老闆娘, '')` ＋ 把 `first_mes` 寫成第一則訊息。
+   ⚠️ **只有「這一輪真的建了老闆娘」才建房間**（`seedDefaultCard()` 回 `null` 就跳過）
+   ——既有的資料夾（使用者自己的角色）不會被塞一間房。
+4. **`custom.css` 範本**（`CUSTOM_CSS_TEMPLATE` 住在 `lib/theme.js`）：整份註解掉、
+   代價零，但把常用類別列出來（含 `.dsh-tv-modelRoot`／`.dsh-tv-modelCell`／
+   `.dsh-tv-attachBtn`…）。**只在新建時給**。
+5. `README.txt`（酒館資料夾裡那一份）改成房間＝資料夾的現況 ＋ `files/` ＋ 裝修。
+6. ⚠️ **`theme.write` 是「整份寫入」不是 patch**（`writeTheme(patch)` 用 patch 蓋掉整個
+   theme）。目前**沒有客戶端呼叫者**，但接設定頁之前要先處理，不然會把沒送的 token
+   全清掉——驗證時就踩到一次（先寫 `radius-md`、再寫一個打錯的 key → token 變成 `{}`）。
+
+**驗證方式（這一輪的做法，日後照抄）**：**不要動使用者的酒館**——用 `tavern.add` 開一間
+暫時的酒館（放在 temp），量完 `tavern.remove` ＋ 刪資料夾。離線的 seed 檢查則直接用
+`node` 開一間 temp 酒館（`TavernWorkspace(root).seed()`），看回報清單與 `summary.counts`。
+實測：`custom.css` 的 `.dsh-tv-bubble{border-radius:3px}` → 兩顆氣泡 **3px**；
+`theme.json` 的 `radius-md:18px`／`accent:#3ec46d`／`style.bubble:"tail"` →
+**18px／#3ec46d／`--dsh-tv-bubble-tail: block`**。
+
+### 2.6.43 這一輪（對話框：模型與思考強度）
+
+使用者：「我們先完成了對話框吧，現在的選擇模型，思考強度這些還未做好」。
+完整說明在 `CHANGELOG.md` 的 2.6.43；這裡只留**接手的人一定要知道的事**：
+
+1. ⚠️ **第三次空白頁的兇手抓到了**：chip 的 `title` 從 `route.provider` 讀欄位，
+   而 `modelCurrent` 有值、`route` 是 `null` 是常態 → render 丟錯 →
+   `slot entry crashed in 'main'`。**點開選單就會踩到**（`loadModels()` 當時會把目錄
+   default 寫進 `modelCurrent`）。兩個原因都拆了：title 只從 `selection` 取值、
+   目錄 default 有自己的格子（`chat.modelDefault`，只當最後一位後備）。
+   → **`plan.md` 舊版那句「進房那條 effect 裡不要再塞新的非同步讀取」是誤診**，
+   真正的原因是這條 null 讀取；目錄現在可以在 `loadUsage` 順手讀（只讀一次）。
+2. 「現在選什麼」**讀 session 的 `modelSelection` 投影**（跟 DSH 自己的 chip 同一份）：
+   `ctxRef.get('sessions').binding(sessionId).session.projections.faceOf('modelSelection')`
+   → `getSnapshot()` → `next ?? lastUsed`。**整段包 try/catch**，讀不到就退回
+   `usage.route`（它是選配來源，不可以弄倒頁面）。
+3. 等級的規則**照 DSH 抄**（`choices`／`currentChoice`／`effectiveEffort`／`effortChoices`）：
+   只挑模型時「保留目前那一級，不合法就用新模型的 `defaultEffort`」；
+   「提供方預設」只在模型**沒有** `defaultEffort` 時出現；
+   **沒有 `reasoning` 這一層**的模型連 chip 上那一格都不顯示。
+4. 全新的房要能選 → `sessionForModelPick()`：沒有 session 就順手 `ensureChatSession`
+   （房間 ↔ session 一對一，模型選擇記在 session 上，不開就沒地方記）。
+5. 選單對齊 chip 的**正確做法**：面板是卡片的子節點，用
+   `right: 卡片右緣 − chip 右緣`。**不要 portal、不要 fixed**（那兩招都試過、都會看不到）。
+6. 純函式全部搬到**模組層級**（`modelKeyOf`／`effortOptionsOf`／`resolveEffortFor`／`chipTextOf`…），
+   測試出口是 `__model`——它們原本住在 render 裡，在那裡出錯的代價是整頁消失。
+7. **UI 照 DSH 的 `ui-model-selection` 逐項對齊**（使用者貼了那顆 chip 的 DOM 說
+   「他的 ui ux 做得比較流暢」）。要動這一塊之前**先讀它的 `client.js`**，重點事實：
+   - chip ＝ `root`（`position:relative`）裡面包 `trigger`：**圖示 ＋ `triggerLabel` ＋
+     `triggerEffort` ＋ chevron**；`title` ＝ `模型名 · 等級`；`aria-label` ＝
+     「選擇模型，目前 X，推理等級 Y」。
+   - 選單**兩層**（`pane`）：root 是兩列 `_cell`（模型／推理等級，值靠右、右邊 `›`），
+     點進去才是清單；選項是 `_option` ＋ `role=menuitemradio` ＋ 打勾。
+   - **等級那一列只在模型有 `reasoning` 時出現**；「提供方預設」只在模型**沒有**
+     `defaultEffort` 時出現。
+   - **點已經選中的那一個＝只關掉選單**（不送請求、不跳通知）。
+   - 用詞是 DSH 的「**推理等級**」（`menu.effort`），不是「思考強度」。
+   - 它用 portal 到 `document.body` ＋ `position:fixed`，是因為它的 composer 住在有
+     overflow 的容器裡。**酒館不需要、也不該抄那一半**：選單掛在 `.dsh-tv-modelRoot`
+     裡、`right:0` 就精準貼齊 chip（實測右緣差 0px）——portal 與 fixed 在這個 repo
+     各失敗過一次（面板被丟到畫面外）。
+
 
 ### 2.6.42 這一輪（附件：上傳檔案與圖片）
 
@@ -239,18 +347,19 @@ DSH 有能力但沒有角色扮演的前台。這個插件是把兩邊接起來�
 > 附件在 **2.6.42**（見 §2 與 `CHANGELOG.md`）。重複的那一份已刪掉。
 
 ```
-lib/index.js       宿主半（Node）。51 個 rpc op ＋ **三條** HTTP 路由（rpc／插圖／附件）。
+lib/index.js       宿主半（Node）。51 個 rpc op ＋ **四條** HTTP 路由（rpc／插圖／PNG 卡／附件）。
                    ⚠️ 在 dsh web 的啟動路徑上——壞了整個 DSH 開不起來。inject 只有 webServer
 lib/client.js      瀏覽器半。全部 UI。是手寫的 __ModuleLoader__ bundle，不是 ESM、沒有 JSX
 lib/agent.js       Agent 面（新）。只在 preset 裡跑。動態系統提示 ＋ 世界書 ＋ 工具遮罩
 lib/worldbook.js   世界書的觸發邏輯（純函式，好測）
 lib/workspace.js   一個酒館資料夾的讀寫（結構、卡片、世界書、對話、插圖、session 對照表）
+                   ⚠️ `cardFileOf()` 是「這張卡是哪個檔案」的**唯一判斷點**（.json 或 .png）
 lib/registry.js    酒館街的註冊表（~/.dsh/taverns.json）
-lib/assets.js      插圖（art/ 底下，一項一組圖 ＋ 主圖）
+lib/assets.js      插圖（art/ 底下，一項一組圖 ＋ 主圖）＋ PNG 卡的路由前綴與 URL
 lib/roomfiles.js   房間的**附件**（`<room>/files/`：訊息裡夾帶的圖片／檔案 ＋ 讀取路由）
-lib/pngcard.js     PNG 角色卡的 tEXt chunk 解析
+lib/pngcard.js     PNG 角色卡：tEXt chunk 的**讀**與**寫**（寫回要用 `replaceCardInPng`）
 lib/write.js       原子寫入（暫存檔 → rename）
-lib/defaults.js    新建酒館的預設內容（老闆娘 ＋ 世界書）
+lib/defaults.js    新建酒館的預設內容（老闆娘 ＋ 世界書；老闆娘是 PNG 卡）
 ```
 
 **測試**：`verify.mjs`（安裝前契約）、`test-agent.mjs`、`test-worldbook.mjs`、

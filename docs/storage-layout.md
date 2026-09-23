@@ -31,9 +31,16 @@ characters/老闆娘/images/微笑.png
 反過來也一樣糟：如果把圖直接散在 `characters/`（`characters/老闆娘.png`），
 **ST 會把每一張圖當成一個獨立的角色**列出來 → 角色庫出現一堆重複人物。
 
+> ⚠️ **2026-09-22 更新：這一點對「PNG 卡」不成立，而且我們現在刻意用它。**
+> ST 把 `characters/*.png` 當成角色**正是因為那本來就是它的角色格式**——卡片資料
+> （提示詞、開場白）住在 PNG 的 tEXt chunk 裡。所以 `characters/` 底下兩種都收：
+> `.json`（酒館自己的格式）與 `.png`（**PNG 卡**，見 §2b）。
+> 上面那段「角色重複」講的是**插圖**被散置進去，那種情況仍然是錯的——
+> 插圖一律留在 `art/`。
+
 ```
-(B) 巢狀 → 角色消失      (C) 散置 → 角色重複
-(A) 平行目錄 → 不與 ST 打架   ← 我們選這個
+(B) 巢狀 → 角色消失      (C) 插圖散置 → 角色重複
+(A) 平行目錄 ＋ characters/ 只放卡（.json 或 PNG 卡）   ← 我們選這個
 ```
 
 ## 2. 定稿的形狀
@@ -73,10 +80,29 @@ characters/老闆娘/images/微笑.png
 
 | 實體 | 資料檔 | 它的 id | 媒體目錄 |
 |---|---|---|---|
-| 角色卡 | `characters/<id>.json` | 檔名去 `.json` | `art/characters/<id>/` |
+| 角色卡 | `characters/<id>.json` **或** `characters/<id>.png`（PNG 卡，見 §2b） | 檔名去副檔名 | `art/characters/<id>/` |
 | 世界書 | `worldbooks/<id>.json` | 檔名去 `.json` | `art/worldbooks/<id>/` |
 | 房間 | `chats/<角色>/<房間id>/chat.jsonl` | `<角色>/<房間id>` | `chats/<角色>/<房間id>/art/` |
 | 店面 | （`tavern.json` 的一部分） | （無） | `art/tavern/` |
+
+### 2b. PNG 卡（`characters/<id>.png`）——提示詞住在圖裡面
+
+使用者（2026-09-22）：「提示詞住在 PNG 裡，我這裡指的是**酒館角色卡的寫法**」
+→「PNG 卡直接就是卡（讀得到、寫得回去）」。
+
+| 規則 | 內容 |
+|---|---|
+| **讀** | `characters/*.png` 直接就是卡：讀 `ccv3`（優先）或 `chara` 的 tEXt chunk。丟進去就會出現在卡司／海報牆／新對話。 |
+| **寫** | 在面板上改一張 PNG 卡 → **寫回同一張 PNG**（`replaceCardInPng`：換掉舊的卡片區塊、`IDAT` 一個位元組都不動、沿用原本的關鍵字）。**不會**長出一份 `.json`。 |
+| **圖** | 卡片本體**就是**這張卡的立繪（沒有插圖時頭像／海報用它，走 `/api/dsh-tavern/card/<id>`）。它不算插圖（`source: 'card'`），插圖管理器不給刪。 |
+| **兩個都有時** | `.json` 優先（那是酒館自己編的那一份）——`cardFileOf()` 是唯一的判斷點。 |
+| **匯入** | PNG → **位元組原封不動**存成 `characters/<id>.png`（不轉檔、不寫 `originals/`、不複製到 `art/`）；JSON → `characters/<id>.json`。**撞名自動編號**（`名字-2.png`）。 |
+| **新建酒館的預設角色** | 就是出貨的 `samples/characters/老闆娘.png` 逐位元組複製。 |
+
+⚠️ **寫回一定要用「換掉」而不是「接上去」**：讀取端 `ccv3` 優先，所以對一張已經有
+`ccv3` 的圖再 `writeCardIntoPng(…, {keyword:'chara'})`，讀回來的還是**舊的 ccv3**
+（改了卡、存檔看起來成功，其實沒生效）。`replaceCardInPng` 就是為此存在，
+測試釘住「卡片區塊只有一個」與「非 tEXt 的位元組完全相同」。
 
 ## 3. 四個掛載點形狀完全一致——這不是巧合，是規則
 

@@ -15,6 +15,7 @@ import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { readTextChunks } from './lib/pngcard.js'
 
 // 註冊表放在 DSH home；測試一律用暫存 home，才不會碰到使用者真的酒館街。
 const home = mkdtempSync(join(tmpdir(), 'tavern-smoke-home-'))
@@ -268,13 +269,52 @@ function pngCard(entries) {
   assert.equal(settings.version, 1)
 
   // 新建酒館不該是空的：附一位老闆娘、一本世界書、以及**輸出格式**（使用者要求）。
-  assert.equal(existsSync(join(shop, 'characters', '老闆娘.json')), true, '應該附一張老闆娘')
+  // ⚠️ 預設角色是 **PNG 卡**（`characters/老闆娘.png`，提示詞住在 `ccv3` 裡）——
+  // 使用者：「留意他的提示詞要寫進 PNG 卡片當中」。
+  assert.equal(existsSync(join(shop, 'characters', '老闆娘.png')), true, '應該附一張老闆娘（PNG 卡）')
+  assert.equal(
+    existsSync(join(shop, 'characters', '老闆娘.json')),
+    false,
+    'PNG 卡就是卡，不要再寫一份 JSON（兩份真相）',
+  )
   assert.equal(existsSync(join(shop, 'worldbooks', '酒館.json')), true, '應該附一本世界書')
   assert.equal(existsSync(join(shop, 'worldbooks', '輸出格式.json')), true, '應該附輸出格式（預設，不是選配）')
+  // 房間的 id 是隨機的 → 先挑出來，其餘照順序比對。
+  const seededRoom = added.value.skeleton.filter((item) => /^chats\//.test(item))
+  assert.equal(seededRoom.length, 1, '新酒館要附一間可以直接聊的房間：' + added.value.skeleton.join(' '))
+  assert.match(seededRoom[0], /^chats\/老闆娘\/[a-z0-9]+-[a-z0-9]+\/chat\.jsonl$/, seededRoom[0])
   assert.deepEqual(
-    added.value.skeleton.slice().sort(),
-    ['characters/老闆娘.json', 'worldbooks/輸出格式.json', 'worldbooks/酒館.json'],
+    added.value.skeleton.filter((item) => !/^chats\//.test(item)).sort(),
+    ['characters/老闆娘.png', 'custom.css', 'worldbooks/輸出格式.json', 'worldbooks/酒館.json'],
     'skeleton 要回報實際建立了什麼：' + added.value.skeleton.join(' '),
+  )
+  // 預設房間裡要有開場白（卡片的 first_mes），不然「可以直接聊」是假的。
+  const roomId = seededRoom[0].split('/')[2]
+  const seededChat = readFileSync(join(shop, 'chats', '老闆娘', roomId, 'chat.jsonl'), 'utf8')
+  assert.match(seededChat, /銅鈴/, '預設房間要有一則開場白（老闆娘的 first_mes）')
+  // 預設角色的圖就是那張卡片本身：`character.list` 要把它當成主圖回報（頭像、海報牆靠它）。
+  const seededCards = (await callRpc('character.list', {})).value
+  assert.equal(seededCards.length, 1, '清單要有一張卡')
+  assert.equal(seededCards[0].file, '老闆娘.png', '卡片檔案是 PNG（不是 .json）')
+  assert.equal(seededCards[0].name, '老闆娘', '名字從 PNG 裡的卡片讀出來')
+  assert.equal(seededCards[0].assets.primary, '老闆娘.png', '卡片本體就是主圖')
+  assert.equal(
+    seededCards[0].assets.items[0].source,
+    'card',
+    '卡片本體在清單裡要標成 card（不是插圖，客戶端不給刪）',
+  )
+  // 「裝修」的入口要在新酒館裡就看得到：一份**整份註解掉**的 custom.css 範本
+  // （沒有任何生效的規則，所以附了不會改變外觀）。
+  const cssTemplate = readFileSync(join(shop, 'custom.css'), 'utf8')
+  assert.match(cssTemplate, /custom\.css/, '範本要說明自己是什麼')
+  assert.match(cssTemplate, /\.dsh-tv-bubble/, '範本要列出常用類別（不然使用者不知道要寫什麼）')
+  assert.deepEqual(
+    cssTemplate
+      .split('\n')
+      .filter((line) => line.trim() !== '')
+      .filter((line) => !/^\s*(\/\*|\*)/.test(line)),
+    [],
+    '範本裡不可以有生效的規則（附了就不該改變外觀）',
   )
   console.log('4. 新增酒館 OK — 建立', added.value.skeleton.join(' '))
 
@@ -331,8 +371,15 @@ function pngCard(entries) {
   assert.equal(JSON.parse(readFileSync(join(shop, 'tavern.json'), 'utf8')).note, '筆記')
 
   const summary = await callRpc('workspace')
-  // 1 張預設老闆娘 ＋ 1 張測試角色；世界書同理（酒館 ＋ 輸出格式 ＋ 測試用那一本）。
-  assert.deepEqual(summary.value.counts, { characters: 2, worldbooks: 3, chats: 1, art: 0 })
+  /**
+   * 1 張預設老闆娘 ＋ 1 張測試角色；世界書同理（酒館 ＋ 輸出格式 ＋ 測試用那一本）。
+   *
+   * ⚠️ `chats` **不是 0**：新建酒館現在就附一間可以直接聊的房間。
+   * ⚠️ `art` **是 0**：預設老闆娘是 **PNG 卡**（`characters/老闆娘.png`），
+   * 那張圖是「卡片本體」而不是插圖——它不算在 `art/` 的數量裡，
+   * 但 `character.list` 會把它當成主圖回報（上面 §4 釘住了）。
+   */
+  assert.deepEqual(summary.value.counts, { characters: 2, worldbooks: 3, chats: 2, art: 0 })
   assert.equal(summary.value.settings.note, '筆記', 'workspace 要順便帶回這間酒館的設定')
   console.log('5. 檔案 API OK —', JSON.stringify(summary.value.counts))
 }
@@ -574,6 +621,9 @@ function pngCard(entries) {
   // 回到 4：房間的圖在 `chats/<角色>/<roomId>/art/`，**不在 `art/` 底下**，
   // 所以計數現在**兩邊都掃**（`countArt` ＋ `countRoomArt`）——
   // 2.6.6 剛上線時只掃 `art/`，這裡的數字曾經掉到 3。
+  //
+  // 4 張＝測試角色的兩張 ＋ 房間的一張 ＋ 店面的一張。
+  // （預設老闆娘的圖不在這裡：它是**卡片本體** `characters/老闆娘.png`，不是插圖。）
   assert.equal(summary.value.counts.art, 4, 'art 計數要數到四張圖（角色 2 + 房間 1 + 店面 1）')
   console.log('9. 對話室與店面 OK — art 計數 =', summary.value.counts.art)
 }
@@ -730,7 +780,15 @@ function pngCard(entries) {
   const dropped = await callRpc('chat.delete', { character: '老闆娘', chat: made.value.room })
   assert.equal(dropped.ok, true, 'chat.delete 應該存在而且成功：' + dropped.error)
   assert.deepEqual(dropped.value.unbound, ['session-smoke-delete-0000-1111-222233334444'], '要回報解掉了哪個 session')
-  assert.equal((await callRpc('chat.list', {})).value.length, 0, '對話清單要空了')
+  // ⚠️ 不是 0：新建酒館本來就附一間預設房（見 §4），所以剩下的應該正好是它。
+  const leftRooms = (await callRpc('chat.list', {})).value
+  assert.equal(leftRooms.length, 1, '只剩新建時附的那一間預設房：' + JSON.stringify(leftRooms.map((r) => r.name)))
+  assert.equal(leftRooms[0].character, '老闆娘', '預設房是老闆娘的')
+  assert.equal(
+    leftRooms.some((room) => room.room === made.value.room),
+    false,
+    '被刪的那一間不該還在清單裡',
+  )
   assert.equal((await callRpc('session.list', {})).value.length, 0, '綁定也要清掉')
 
   // 不存在的對話 → 明確報錯
@@ -1156,41 +1214,73 @@ function pngCard(entries) {
   assert.equal(imported.value.id, 'PNG-角色')
   assert.equal(imported.value.name, 'PNG 角色', '顯示名要保留原樣（含空白）')
   assert.equal(imported.value.source, 'png:chara')
-  assert.equal(imported.value.originalKept, true, 'PNG 的原始位元組要留下來')
-  assert.equal(imported.value.artAdded, 'PNG-角色.png', 'PNG 本身要變成這張卡的插圖')
+  assert.equal(imported.value.cardFile, 'PNG-角色.png', 'PNG 卡直接存成 characters/<id>.png')
+  assert.equal(imported.value.originalKept, true, 'PNG 卡的原版就是卡片本身')
 
-  // 卡片資料真的寫成我們的格式
-  const cardOnDisk = JSON.parse(readFileSync(join(cardShop, 'characters', 'PNG-角色.json'), 'utf8'))
-  assert.equal(cardOnDisk.spec, 'chara_card_v2')
-  assert.equal(cardOnDisk.data.description, '從 PNG 讀出來的')
-  assert.equal(cardOnDisk.data.name, 'PNG 角色', '顯示名要原樣保留')
-  assert.deepEqual(cardOnDisk.data.unknown_field, { keep: true }, '未知欄位要活下來')
-
-  // 原始 PNG 留在 originals/（不在 characters/，免得污染 ST 的角色庫）
-  assert.equal(existsSync(join(cardShop, 'originals', 'cards', 'PNG-角色.png')), true, '原版要留一份')
+  /**
+   * ⚠️ **不轉檔**（使用者：「PNG 卡直接就是卡，讀得到、寫得回去」）：
+   * 位元組原封不動存在 `characters/`，所以提示詞一直住在卡片裡，
+   * 而且不需要 `originals/` 或 `art/` 的第二份。
+   */
+  const importedBytes = readFileSync(join(cardShop, 'characters', 'PNG-角色.png'))
+  assert.deepEqual(importedBytes, pngCard([['chara', v2Card]]), 'PNG 要逐位元組原樣存下來')
   assert.equal(
-    existsSync(join(cardShop, 'characters', 'PNG-角色.png')),
+    existsSync(join(cardShop, 'characters', 'PNG-角色.json')),
     false,
-    '原版不可以放在 characters/ 底下（ST 會把它當成第二個角色）',
+    '不要另外寫一份 JSON（兩份真相）',
+  )
+  assert.equal(
+    existsSync(join(cardShop, 'originals', 'cards', 'PNG-角色.png')),
+    false,
+    '原版就是卡片本身，不需要 originals/ 的第二份',
   )
 
-  // 插圖那一份要和原版位元組完全相同（同一張圖，不是重新編碼過的）
-  const artBytes = readFileSync(join(cardShop, 'art', 'characters', 'PNG-角色', 'PNG-角色.png'))
-  const originalBytes = readFileSync(join(cardShop, 'originals', 'cards', 'PNG-角色.png'))
-  assert.deepEqual(artBytes, originalBytes, '插圖要跟原版位元組相同')
-  const listed = await callRpc('assets.list', { kind: 'character', owner: 'PNG-角色' })
-  assert.equal(listed.value.primary, 'PNG-角色.png', '匯入的第一張圖自動成為主圖')
+  // 讀得到、而且是從 PNG 裡讀出來的（提示詞在卡片裡）
+  const importedCard = await callRpc('character.read', { card: 'PNG-角色' })
+  assert.equal(importedCard.value.description, '從 PNG 讀出來的')
+  assert.equal(importedCard.value.name, 'PNG 角色', '顯示名要原樣保留')
+  assert.deepEqual(importedCard.value.unknown_field, { keep: true }, '未知欄位要活下來')
+
+  // 卡片的本體圖就是立繪（沒有另外上傳插圖時，頭像／海報牆用它）
+  const importedList = await callRpc('character.list', {})
+  const importedEntry = importedList.value.find((item) => item.id === 'PNG-角色')
+  assert.equal(importedEntry.assets.primary, 'PNG-角色.png', '卡片本體就是主圖')
+  assert.equal(importedEntry.assets.items[0].source, 'card', '標成 card（不是插圖）')
+  assert.equal(importedEntry.assets.items[0].url, '/api/dsh-tavern/card/PNG-%E8%A7%92%E8%89%B2', '走卡片路由')
+
+  // **寫得回去**：改一個欄位 → 卡片 PNG 更新，但圖的位元組不能被重新編碼。
+  const edited = { ...importedCard.value, description: '改過了（寫回 PNG）' }
+  const wrote = await callRpc('character.write', { card: 'PNG-角色', payload: edited })
+  assert.equal(wrote.ok, true, '寫回 PNG 卡：' + wrote.error)
+  const rewritten = readFileSync(join(cardShop, 'characters', 'PNG-角色.png'))
+  assert.equal(rewritten.subarray(0, 4).toString('hex'), '89504e47', '寫回之後還是 PNG')
+  assert.equal(
+    existsSync(join(cardShop, 'characters', 'PNG-角色.json')),
+    false,
+    '寫回不會偷偷長出一份 JSON',
+  )
+  const reread = await callRpc('character.read', { card: 'PNG-角色' })
+  assert.equal(reread.value.description, '改過了（寫回 PNG）', '新的內容要生效（ccv3 要真的被換掉）')
+  // 卡片區塊只有一個（不是「接上去」而是「換掉」——不然讀到的還是舊的 ccv3）
+  assert.equal(
+    readTextChunks(rewritten).filter((chunk) => chunk.keyword === 'chara').length,
+    1,
+    '卡片區塊要replace、不是再接一個上去',
+  )
 
   // ccv3 優先於 chara（SillyTavern 也是這樣挑的）
   const both = await callRpc('character.import', pngCard([['chara', v2Card], ['ccv3', v3Card]]), {
     query: '&name=' + encodeURIComponent('both.png'),
   })
   assert.equal(both.value.source, 'png:ccv3', '同時有 chara 與 ccv3 時要用 ccv3')
-  assert.equal(
-    JSON.parse(readFileSync(join(cardShop, 'characters', 'PNG-角色.json'), 'utf8')).data.description,
-    'V3 版本',
-    'ccv3 的內容要覆蓋掉 chara 的',
-  )
+  /**
+   * ⚠️ 匯入撞名時**自動編號**（照 SillyTavern 的規矩），不會蓋掉使用者已經有的那張卡
+   * ——那個資料夾是他的。
+   */
+  assert.equal(both.value.id, 'PNG-角色-2', '同名要自動編號，不要覆蓋既有卡片')
+  const bothCard = await callRpc('character.read', { card: both.value.id })
+  assert.equal(bothCard.value.description, 'V3 版本', 'ccv3 的內容要覆蓋掉 chara 的')
+  assert.equal((await callRpc('character.read', { card: 'PNG-角色' })).value.description, '改過了（寫回 PNG）', '原本那張卡不受影響')
 
   // 關鍵字大小寫不敏感
   const upper = await callRpc('character.import', pngCard([['CHARA', { name: '大寫角色', description: 'd' }]]), {

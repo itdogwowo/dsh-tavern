@@ -1178,22 +1178,38 @@ function spyRpc(seen, extra) {
 /* ---------- 🎭 卡司：海報牆（找卡）與編輯器（改卡）分開（redesign §3.2）---------- */
 
 {
-  const cardOf = (id, name, primary) => ({
-    id,
-    file: id + '.json',
-    card: { name },
-    assets: {
-      items: primary === null ? [] : [{ name: primary, url: '/api/dsh-tavern/assets/character/' + id + '/' + primary }],
-      primary,
-      owner: id,
-    },
-  })
+  const cardOf = (id, name, primary, options) => {
+    const opts = options === undefined ? {} : options
+    // PNG 卡：圖是「卡片本體」（`characters/<id>.png`），走 `/api/dsh-tavern/card/<id>`，
+    // 而且 `source: 'card'`（不是插圖 → 不給刪）。
+    const url =
+      opts.card === true
+        ? '/api/dsh-tavern/card/' + encodeURIComponent(id)
+        : '/api/dsh-tavern/assets/character/' + id + '/' + primary
+    return {
+      id,
+      file: opts.card === true ? id + '.png' : id + '.json',
+      card: { name },
+      assets: {
+        items:
+          primary === null
+            ? []
+            : [{ name: primary, url, ...(opts.card === true ? { source: 'card' } : {}) }],
+        primary,
+        owner: id,
+      },
+    }
+  }
   Object.assign(exportsObject.__testSeed, {
     loaded: true,
     taverns: [{ id: 'tv-1', name: '測試酒館', active: true, exists: true, scaffolded: true }],
     activeId: 'tv-1',
-    characters: [cardOf('老闆娘', '老闆娘', 'a.png'), cardOf('酒保', '酒保', null)],
-    summary: { name: 'tavern', counts: { characters: 2 }, files: [], layout: [] },
+    characters: [
+      cardOf('老闆娘', '老闆娘', 'a.png'),
+      cardOf('酒保', '酒保', null),
+      cardOf('鯨魚娘', '鯨魚娘', '鯨魚娘.png', { card: true }),
+    ],
+    summary: { name: 'tavern', counts: { characters: 3 }, files: [], layout: [] },
     settings: { name: '測試酒館', note: '' },
   })
   exportsObject.__setRpc((op) =>
@@ -1211,7 +1227,7 @@ function spyRpc(seen, extra) {
     wallTree,
     (el) => el.type === 'button' && el.props.className === 'dsh-tv-poster',
   )
-  assert.deepEqual(posters.map((one) => one.props.title), ['老闆娘', '酒保'], '兩張卡＝兩張海報')
+  assert.deepEqual(posters.map((one) => one.props.title), ['老闆娘', '酒保', '鯨魚娘'], '三張卡＝三張海報')
   // 資產 URL 必須是「**多一個斜線**」的形狀。DSH 的 prefix 比對自己會補一個 `/`
   // 再 `startsWith`，所以 2.6.1 之前註冊成 `…/assets/` 的宿主半只吃得進 `…/assets//…`；
   // 單斜線的 URL 會落到 DSH 自己的 fallback（curl 401、瀏覽器 404），
@@ -1223,11 +1239,24 @@ function spyRpc(seen, extra) {
   )
 
   const withArt = posters.filter((one) => collect(one, (el) => el.type === 'img').length === 1)
-  assert.deepEqual(withArt.map((one) => one.props.title), ['老闆娘'], '有主圖的那一張要用 <img>')
+  assert.deepEqual(withArt.map((one) => one.props.title), ['老闆娘', '鯨魚娘'], '有圖的兩張（插圖 ＋ PNG 卡）要用 <img>')
   const noArt = posters.filter(
     (one) => collect(one, (el) => el.props.className === 'dsh-tv-posterEmpty').length === 1,
   )
   assert.deepEqual(noArt.map((one) => one.props.title), ['酒保'], '沒有主圖的要給佔位符，不要破圖')
+
+  /**
+   * **PNG 卡本體**走的是另一條路由（`characters/<id>.png` → `/api/dsh-tavern/card/<id>`），
+   * 而且它**不需要**那個「多一個斜線」的相容處理（那條路是這一版才有的，沒有舊宿主
+   * 在外面跑）。多補一個斜線就會 404，所以這裡釘住：原樣放行。
+   */
+  assert.equal(
+    collect(posters[2], (el) => el.type === 'img')[0].props.src,
+    '/api/dsh-tavern/card/' + encodeURIComponent('鯨魚娘'),
+    'PNG 卡的圖要走卡片路由、而且**不補斜線**',
+  )
+  assert.equal(posters[2].props.title, '鯨魚娘')
+  assert.match(source, /if \(url\.indexOf\(ASSET_PREFIX\) !== 0\) return url/, '非資產 URL 要原樣放行')
 
   // 點一張海報 → 讀卡（非同步）→ 進編輯器。
   posters[1].props.onClick()
@@ -3884,6 +3913,249 @@ function spyRpc(seen, extra) {
   __selectChat(null)
   reactImpl.resetHooks()
   console.log('14j. 附件 OK — 圖片／檔案分流、content 附件在前、訊息畫得出來、📎 與挑選器都在')
+}
+
+/* ------------------- 模型 chip 與思考強度（使用者：「這些還未做好」）------------------- */
+
+{
+  /**
+   * 這一節釘住的是「選單裡**哪一個算選中**、**什麼時候出現思考強度**、**換模型時等級怎麼收斂**」。
+   *
+   * 抽成純函式的理由很直接：這三段以前住在 render 裡，而「形狀不如預期」在那裡是
+   * **整個 main 面板消失**——線上真的發生過（第三次），而且症狀只有一行 console 錯誤。
+   */
+  const {
+    keyOf,
+    findModel,
+    labelOf,
+    effortsOf,
+    defaultEffortOf,
+    effectiveEffortOf,
+    effortLabelOf,
+    effortOptionsOf,
+    resolveEffortFor,
+  } = exportsObject.__model
+
+  /** 一份跟 DSH `modelCatalog()` 同形狀的目錄。 */
+  const catalog = {
+    default: { provider: 'deepseek', model: 'chat' },
+    groups: [
+      {
+        id: 'deepseek',
+        name: 'DeepSeek',
+        models: [
+          { id: 'chat', name: 'DeepSeek Chat' },
+          {
+            id: 'reasoner',
+            name: 'DeepSeek Reasoner',
+            reasoning: {
+              efforts: [
+                { id: 'low', name: 'Low' },
+                { id: 'high', name: 'High', description: '想久一點' },
+              ],
+            },
+          },
+          {
+            id: 'reasoner-max',
+            name: 'Reasoner Max',
+            reasoning: {
+              defaultEffort: 'max',
+              efforts: [{ id: 'max', name: 'Max' }],
+            },
+          },
+        ],
+      },
+      // 同一個 model id 出現在兩個提供方底下——**這正是「只比 model id」會錯的地方**。
+      { id: 'other', name: 'Other', models: [{ id: 'reasoner', name: 'Other Reasoner' }] },
+    ],
+  }
+
+  // 1. 識別：provider 與 model 兩個欄位都要，缺一不可
+  assert.equal(keyOf({ provider: 'deepseek', model: 'reasoner' }), 'deepseek/reasoner')
+  assert.equal(keyOf({ provider: 'other', model: 'reasoner' }), 'other/reasoner')
+  assert.notEqual(
+    keyOf({ provider: 'deepseek', model: 'reasoner' }),
+    keyOf({ provider: 'other', model: 'reasoner' }),
+    '同一個 model id 在兩個提供方底下必須是不同的選項',
+  )
+  assert.equal(keyOf({ model: 'chat' }), '', '缺 provider 不算一個選項')
+  assert.equal(keyOf(null), '', 'null 要安全')
+  assert.equal(keyOf(undefined), '')
+
+  // 2. 找模型：兩個欄位都要對
+  assert.equal(findModel(catalog, { provider: 'deepseek', model: 'reasoner' }).name, 'DeepSeek Reasoner')
+  assert.equal(findModel(catalog, { provider: 'other', model: 'reasoner' }).name, 'Other Reasoner')
+  assert.equal(findModel(catalog, { provider: 'deepseek', model: '不存在' }), null)
+  assert.equal(findModel(catalog, { provider: '不存在', model: 'reasoner' }), null)
+  assert.equal(findModel(null, { provider: 'deepseek', model: 'chat' }), null, '目錄還沒讀到時要安全')
+
+  // 3. chip 上的名字是**顯示名稱**，不是 id；找不到就退回 id
+  assert.equal(labelOf(catalog, { provider: 'deepseek', model: 'chat' }), 'DeepSeek Chat')
+  assert.equal(labelOf(catalog, { provider: 'deepseek', model: 'x' }), 'x', '目錄裡沒有就顯示 id（看得到優先）')
+  assert.equal(labelOf(null, { provider: 'deepseek', model: 'chat' }), 'chat', '目錄還沒讀到也要有字')
+  assert.equal(labelOf(catalog, null), '', '沒有選擇時回空字串（呼叫端才寫「模型」）')
+
+  // 4. 思考強度：生效值＝使用者挑的 ?? 模型的預設（DSH 的 `??` 語意）
+  const reasoner = findModel(catalog, { provider: 'deepseek', model: 'reasoner' })
+  const reasonerMax = findModel(catalog, { provider: 'deepseek', model: 'reasoner-max' })
+  const plain = findModel(catalog, { provider: 'deepseek', model: 'chat' })
+  assert.equal(effectiveEffortOf(reasoner, { effort: 'high' }), 'high', '挑了就用它')
+  assert.equal(effectiveEffortOf(reasoner, { effort: '' }), undefined, '沒挑、模型也沒預設 → 不指定')
+  assert.equal(effectiveEffortOf(reasonerMax, { effort: '' }), 'max', '沒挑但模型有預設 → 用預設')
+  assert.equal(effectiveEffortOf(reasonerMax, { effort: 'low' }), 'low', '挑的優先於預設')
+
+  // 5. chip 上那一格（`triggerEffort`）：沒有推理等級的模型**不要顯示那一格**
+  assert.equal(effortLabelOf(plain, { effort: '' }), '', '沒有 reasoning 這一層就沒有那一格')
+  assert.equal(
+    effortLabelOf({ reasoning: {} }, { effort: '' }),
+    '提供方預設',
+    '有 reasoning 但沒指定 → 寫「提供方預設」（DSH 就是這樣）',
+  )
+  assert.equal(effortLabelOf(reasoner, { effort: 'high' }), 'High')
+  assert.equal(effortLabelOf(reasoner, { effort: 'low' }), 'Low')
+  assert.equal(effortLabelOf(reasoner, { effort: '' }), '提供方預設', '可以選但不指定 → 寫「提供方預設」')
+  assert.equal(effortLabelOf(reasonerMax, { effort: '' }), 'Max', '模型有預設 → 顯示那一級的 name')
+  assert.equal(effortLabelOf(reasoner, { effort: '不存在的等級' }), '不存在的等級', '認不得的等級照實顯示（不要假裝）')
+
+  // 6. 可選清單：「提供方預設」只在模型**有 `reasoning` 但沒有 `defaultEffort`** 時出現（照 DSH）
+  assert.deepEqual(effortOptionsOf(plain), [], '完全沒有 reasoning 這一層 → 沒有等級可選')
+  assert.deepEqual(
+    effortOptionsOf({ id: 'empty', reasoning: {} }).map((o) => o.id),
+    [''],
+    '有 reasoning 但沒有任何等級/預設 → 只有「提供方預設」',
+  )
+  assert.deepEqual(
+    effortOptionsOf(reasoner).map((o) => o.id),
+    ['', 'low', 'high'],
+    '沒有 defaultEffort → 多一列「提供方預設」',
+  )
+  assert.deepEqual(
+    effortOptionsOf(reasonerMax).map((o) => o.id),
+    ['max'],
+    '有 defaultEffort → 它就是基準，不再列「不指定」',
+  )
+  assert.equal(effortOptionsOf(reasoner)[0].name, '提供方預設')
+  assert.equal(effortOptionsOf(reasoner)[2].description, '想久一點', 'description 要帶出來（當 title）')
+
+  // 7. 換模型時等級要**收斂**（不然就是「選了卻沒生效」）
+  assert.equal(resolveEffortFor(reasoner, 'high'), 'high', '合法的等級原樣送出')
+  assert.equal(resolveEffortFor(reasoner, ''), '', '沒挑、也沒預設 → 不指定')
+  assert.equal(resolveEffortFor(reasonerMax, ''), 'max', '沒挑 → 模型的預設')
+  assert.equal(
+    resolveEffortFor(plain, 'high'),
+    '',
+    '換到沒有推理等級的模型 → 不指定（不要把上一條路由的等級硬送過去）',
+  )
+  assert.equal(
+    resolveEffortFor(reasonerMax, 'high'),
+    'max',
+    '上一條路由的等級在新模型上不存在 → 退回新模型的預設',
+  )
+  assert.equal(resolveEffortFor(reasoner, 'low'), 'low')
+  assert.equal(resolveEffortFor(null, 'high'), '', '找不到模型時不指定（安全）')
+
+  // 8. 形狀壞掉也不能丟錯（這一整組以前就是這樣把整頁弄倒的）
+  const broken = {
+    groups: [
+      null,
+      { id: 'x', models: null },
+      {
+        id: 'y',
+        models: [null, { id: '' }, { id: 'z', name: '', reasoning: { efforts: [null, { id: 'ok', name: 'Ok' }] } }],
+      },
+      'not-a-group',
+    ],
+  }
+  assert.equal(findModel(broken, { provider: 'y', model: 'z' }).id, 'z')
+  assert.deepEqual(effortsOf({ reasoning: { efforts: 'nope' } }), [])
+  assert.equal(defaultEffortOf({ reasoning: null }), undefined)
+  assert.deepEqual(effortOptionsOf(findModel(broken, { provider: 'y', model: 'z' })).map((o) => o.id), ['', 'ok'])
+  assert.equal(labelOf(broken, { provider: 'y', model: 'z' }), 'z', '沒有 name 就用 id')
+  assert.equal(findModel(broken, { provider: 'x', model: 'a' }), null)
+
+  // 8. ⚠️ 回歸：「裝修」那條鏈**一定要有人呼叫**。
+  //
+  // 這一條抓到的是一個真實的、而且很安靜的 bug：`ensureTheme()` → `theme.read` →
+  // `applyTheme()` 整條鏈**從來沒有被呼叫過**，所以 `theme.json` 與 `custom.css`
+  // 一直是死的（畫面永遠用 client 內建的 fallback 色票）。純函式測試全綠、
+  // 宿主半的 op 也在，只有「有沒有人呼叫」這件事沒被釘住。
+  assert.match(
+    source,
+    /function ensureTheme\(tavernId\)/,
+    'ensureTheme 是本體',
+  )
+  const themeCalls = (source.match(/^\s*ensureTheme\(/gm) || []).length
+  assert.ok(themeCalls >= 2, `ensureTheme 至少要有兩個呼叫點（面板 ＋ 側邊欄），實際 ${String(themeCalls)}`)
+  assert.match(source, /ensureTheme\(listed\.activeId\)/, '酒館清單讀到之後要套主題')
+  assert.match(source, /applyCustomCss\(customCss\)/, 'custom.css 要被注入')
+  assert.match(source, /@scope \(\.dsh-tv-view\)/, 'custom.css 要用 @scope 包起來（碰不到宿主）')
+
+  // 9. chip 上那三段字（DSH 的 `modelLabel`／`triggerLabel`／`triggerAria`）
+  const { chipTextOf } = exportsObject.__model
+  const chip = (state) =>
+    chipTextOf({
+      loading: false,
+      selection: null,
+      known: false,
+      modelLabel: '',
+      effortLabel: '',
+      ...state,
+    })
+  assert.deepEqual(
+    chip({ loading: true }),
+    { label: '正在載入模型…', title: '正在載入模型…', aria: '正在載入模型…' },
+    '還在讀目錄時要說「正在載入」',
+  )
+  assert.equal(chip({}).label, '選擇模型', '完全不知道時是「選擇模型」')
+  assert.equal(chip({}).title, '選擇模型')
+  assert.equal(chip({}).aria, '選擇模型')
+  const known = chip({
+    selection: { provider: 'deepseek', model: 'chat' },
+    known: true,
+    modelLabel: 'DeepSeek Chat',
+  })
+  assert.equal(known.label, 'DeepSeek Chat', '知道就用目錄裡的顯示名稱')
+  assert.equal(known.title, 'DeepSeek Chat', '沒有等級時 title 就是模型名')
+  assert.equal(known.aria, '選擇模型，目前 DeepSeek Chat', 'aria 要講「目前是哪個」')
+  const withEffort = chip({
+    selection: { provider: 'deepseek', model: 'chat' },
+    known: true,
+    modelLabel: 'DeepSeek Chat',
+    effortLabel: 'High',
+  })
+  assert.equal(withEffort.title, 'DeepSeek Chat · High', 'title 是「模型 · 等級」（DSH 用 `·`）')
+  assert.equal(withEffort.aria, '選擇模型，目前 DeepSeek Chat，推理等級 High', 'aria 要一起報等級')
+  const unknown = chip({ selection: { provider: 'p', model: 'm' } })
+  assert.equal(unknown.label, 'p/m', '目錄裡找不到（例如被下架）就老實寫 provider/model')
+
+  // 10. 原始碼層級：那條**讓整頁消失**的 null 讀取不可以回來，而且結構要照 DSH
+  assert.doesNotMatch(
+    source,
+    /mine === null \|\| mine === undefined[\s\S]{0,200}?String\(route\.provider\)/,
+    'chip 的 title 不可以從 route 讀欄位（selection 有值、route 是 null 是常態 → 整個面板消失）',
+  )
+  assert.match(source, /function readSessionSelection\(sessionId\)/, '要從 session 的 modelSelection 投影讀「現在選什麼」')
+  assert.match(source, /faceOf\('modelSelection'\)/, '讀的是 DSH 自己那一個投影')
+  assert.match(source, /function sessionForModelPick\(\)/, '全新的房（還沒有 session）也要能選模型')
+  assert.doesNotMatch(source, /先送一句話再換模型/, '那個擋路的錯誤訊息不該還在')
+  assert.match(source, /var nowKey = modelKeyOf\(selection\)/, '選中與否要用 provider＋model 比對')
+  assert.match(source, /var options = effortOptionsOf\(model\)/, '等級清單要走 effortOptionsOf')
+  assert.doesNotMatch(source, /chat\.modelRect|measureModelAnchor/, '死掉的定位狀態／量測不該還在')
+  // chip 的結構照 DSH：root 包住 trigger，選單住在 root 裡（`right:0` 就能貼齊）
+  assert.match(source, /className: 'dsh-tv-modelRoot'/, 'chip 要有 root 包裝（DSH 的 ._7KE1Ra_root）')
+  assert.match(source, /React\.createElement\(ModelIcon\)/, 'chip 要有模型圖示（DSH 的 triggerIcon）')
+  assert.match(source, /className: 'dsh-tv-modelEffortTag'/, 'chip 要有等級那一格（triggerEffort）')
+  assert.match(source, /'aria-label': text\.aria/, 'chip 要有 aria-label（DSH 的 triggerAria）')
+  // 兩層選單：root / model / effort
+  assert.match(source, /chat\.modelPane === 'model' \|\| chat\.modelPane === 'effort'/, '選單要有兩層（pane）')
+  assert.match(source, /className: 'dsh-tv-modelCell'/, '第一層是 cell（標籤＋目前的值＋往右箭頭）')
+  assert.match(source, /className: 'dsh-tv-modelCellLabel' \}, '模型'/, '第一層第一列是「模型」')
+  assert.match(source, /className: 'dsh-tv-modelCellLabel' \}, '推理等級'/, '第一層第二列是「推理等級」（DSH 的 menu.effort）')
+  assert.match(source, /'aria-label': '模型與推理等級'/, '選單的 aria-label（DSH 的 menu.aria）')
+  assert.match(source, /role: 'menuitemradio'/, '選項要是 menuitemradio（無障礙）')
+  assert.match(source, /這個模型沒有提供推理等級。/, '空的等級清單要有說明（DSH 的 empty.efforts）')
+
+  console.log('14k. 模型 chip OK — DSH 的兩層選單／chip 三段字／provider＋model 比對／null 讀取不會再弄倒整頁')
 }
 
 /* ------------------------------ 逐個元件試渲染 ------------------------------ */

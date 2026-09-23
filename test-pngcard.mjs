@@ -7,7 +7,7 @@
  */
 import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
-import { isPng, readTextChunks, readCardFromPng, findCardText, writeCardIntoPng } from './lib/pngcard.js'
+import { isPng, readTextChunks, readCardFromPng, findCardText, writeCardIntoPng, replaceCardInPng } from './lib/pngcard.js'
 
 const SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 
@@ -107,6 +107,60 @@ assert.ok(
 )
 assert.equal(written.subarray(written.length - 12).toString('latin1', 4, 8), 'IEND', '檔尾仍然是 IEND')
 console.log('5. 寫入 OK — chara 插在 IEND 之前、IDAT 原封不動、讀得回來')
+
+/* --- 5b. 寫回：換掉舊的卡片區塊（編輯 PNG 卡時走的就是這一支） -------------- */
+{
+  /**
+   * ⚠️ 這一節是一個**真實的陷阱**：`writeCardIntoPng` 是「接上去」，而讀取端
+   * `ccv3` 優先。所以對一張已經有 `ccv3` 的圖再 `writeCardIntoPng(…, {keyword:'chara'})`，
+   * 讀回來的**還是舊的 ccv3**——使用者在面板上改了卡、存檔看起來成功，其實沒生效。
+   * `replaceCardInPng` 就是為此而寫：舊的卡片區塊會被拿掉。
+   */
+  const v3 = { spec: 'chara_card_v3', spec_version: '3.0', data: { name: 'V3', description: '第一版' } }
+  const withV3 = writeCardIntoPng(minimalPng(), v3, { keyword: 'ccv3' })
+  assert.equal(readCardFromPng(withV3).keyword, 'ccv3', '先確認前置：讀到的是 ccv3')
+
+  const edited = { ...v3, data: { ...v3.data, description: '改過了' } }
+  const rewritten = replaceCardInPng(withV3, edited, { keyword: 'ccv3' })
+  assert.deepEqual(readCardFromPng(rewritten).card, edited, '寫回之後要讀到新的內容')
+  assert.equal(
+    readTextChunks(rewritten).filter((chunk) => chunk.keyword === 'ccv3').length,
+    1,
+    '舊的 ccv3 要被換掉，不是再接一個上去',
+  )
+  // 圖的位元組不能被重新編碼（把非 tEXt 的 chunk 串起來比對）
+  const strip = (buf) => {
+    const parts = [buf.subarray(0, 8)]
+    let offset = 8
+    while (offset + 8 <= buf.length) {
+      const length = buf.readUInt32BE(offset)
+      const type = buf.toString('latin1', offset + 4, offset + 8)
+      const next = offset + 8 + length + 4
+      if (type !== 'tEXt') parts.push(buf.subarray(offset, next))
+      if (type === 'IEND') break
+      offset = next
+    }
+    return Buffer.concat(parts)
+  }
+  assert.deepEqual(strip(rewritten), strip(withV3), '除了 tEXt 之外，位元組要完全相同（IDAT 沒被動）')
+
+  // 混搭：圖上同時有 chara 與 ccv3 → 寫回要把兩個都清掉，只留新的那一個。
+  const both = writeCardIntoPng(writeCardIntoPng(minimalPng(), v3, { keyword: 'chara' }), v3, {
+    keyword: 'ccv3',
+  })
+  const cleaned = replaceCardInPng(both, edited, { keyword: 'ccv3' })
+  assert.deepEqual(
+    readTextChunks(cleaned).map((chunk) => chunk.keyword),
+    ['ccv3'],
+    '兩種卡片區塊都要被清掉',
+  )
+  assert.deepEqual(readCardFromPng(cleaned).card, edited)
+
+  // 壞檔的防護跟寫入端一樣
+  assert.throws(() => replaceCardInPng(Buffer.from('nope'), v2), /不是 PNG/)
+  assert.throws(() => replaceCardInPng(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), v2), /IEND/)
+  console.log('5b. 寫回 OK — 舊的 ccv3 會被換掉、只留一個區塊、IDAT 沒被動、壞檔照樣擋')
+}
 
 /* --- 6. 寫入的 chunk 要合法（含 CRC） ------------------------------------ */
 // 找自己寫進去的那個 tEXt，把它的 CRC 重算一次對答案。

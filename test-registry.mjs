@@ -42,17 +42,21 @@ try {
     const result = await registry.add(shop)
     assert.equal(result.created, true)
     // 骨架（四個目錄 ＋ tavern.json ＋ README.txt）之後才是預設內容。
+    const seededRoom = result.skeleton.filter((item) => /^chats\//.test(item))
+    assert.equal(seededRoom.length, 1, '新酒館要附一間可以直接聊的房間：' + result.skeleton.join(' '))
+    assert.match(seededRoom[0], /^chats\/老闆娘\/[a-z0-9]+-[a-z0-9]+\/chat\.jsonl$/, seededRoom[0])
     assert.deepEqual(
-      result.skeleton.slice().sort(),
-      ['characters/老闆娘.json', 'worldbooks/輸出格式.json', 'worldbooks/酒館.json'],
-      'skeleton 只回報「這次建立了什麼」，所以是預設內容那三個檔案',
+      result.skeleton.filter((item) => !/^chats\//.test(item)).sort(),
+      ['characters/老闆娘.png', 'custom.css', 'worldbooks/輸出格式.json', 'worldbooks/酒館.json'],
+      'skeleton 只回報「這次建立了什麼」：預設內容（PNG 卡）＋ 裝修的 custom.css 範本',
     )
+    assert.equal(existsSync(join(shop, 'custom.css')), true, '裝修的範本也要建立（整份註解掉）')
     for (const part of ['characters', 'worldbooks', 'chats', 'art']) {
       assert.equal(existsSync(join(shop, part)), true, `應該建立 ${part}/`)
     }
     assert.equal(existsSync(join(shop, 'tavern.json')), true)
     assert.equal(existsSync(join(shop, 'README.txt')), true, '說明檔也要建立')
-    assert.equal(existsSync(join(shop, 'characters', '老闆娘.json')), true, '要附一張老闆娘')
+    assert.equal(existsSync(join(shop, 'characters', '老闆娘.png')), true, '要附一張老闆娘（PNG 卡）')
     assert.equal(existsSync(join(shop, 'worldbooks', '酒館.json')), true, '要附一本世界書')
     const listed = await registry.list()
     assert.equal(listed.taverns.length, 1)

@@ -2,6 +2,230 @@
 
 版本號照 [Semantic Versioning](https://semver.org/lang/zh-TW/)。
 
+## 2.6.45 — PNG 卡直接就是卡（讀得到、寫得回去）
+
+使用者：「提示詞住在 PNG 裡，我這裡指的是**酒館角色卡的寫法**」→
+「PNG 卡直接就是卡（讀得到、寫得回去）」。
+
+以前 `characters/` **只讀 `.json`**：把 SillyTavern 的卡（一張 `.png`）丟進去，
+面板完全看不到它；而「📥 匯入 PNG 卡」會**轉檔**成 `.json` ＋ 留一份 `originals/`
+＋ 再複製一份到 `art/`（同一張圖三個地方，而提示詞從此住在 JSON 裡）。
+
+現在 PNG 卡是第一級的卡：
+
+| | 以前 | 現在 |
+|---|---|---|
+| `characters/` 裡的 `.png` | **看不到** | 直接就是這張卡（讀 `ccv3`／`chara`），出現在卡司／海報牆／新對話 |
+| 在面板上改卡片 | 寫 `.json` | **寫回同一張 PNG**（換掉裡面的卡片區塊，`IDAT` 一個位元組都不動） |
+| 卡片的那張圖 | 另外複製到 `art/` | **卡片本體就是立繪**（沒有插圖時，頭像／海報牆用它；走新的 `/api/dsh-tavern/card/<id>`） |
+| 匯入 PNG 卡 | `.json` ＋ `originals/` ＋ `art/`（三份） | **位元組原封不動存成 `characters/<id>.png`**（一份） |
+| 新建酒館的預設老闆娘 | `.json`（沒有臉） | **`characters/老闆娘.png`**（出貨那張 V3 卡，提示詞就在裡面） |
+| 匯入撞名 | 覆蓋同名卡 | **自動編號**（`名字-2.png`，照 ST 的規矩；那是使用者的檔案） |
+
+實作要點：
+
+- `lib/pngcard.js` 新增 **`replaceCardInPng()`**（寫回用的那一支）。
+  ⚠️ 這裡有一個**真實的陷阱**：`writeCardIntoPng` 是「接上去」而讀取端 `ccv3` 優先，
+  所以對一張已經有 `ccv3` 的圖再寫 `chara`，**讀回來的還是舊的 ccv3**——改了卡、
+  存檔看起來成功，其實沒生效。`replaceCardInPng` 會先把舊的卡片區塊拿掉。
+- `workspace.js` 的 `cardFileOf()`：**`.json` 與 `.png` 都是卡**，同名時 `.json` 優先
+  （那是酒館自己編的那一份）。`listCharacters`／`readCharacter`／`writeCharacter`／
+  `deleteCharacter` **全部走它**，所以「寫回同一種形式」是一條規則而不是四個地方各自判斷。
+- `describeEntityAssets('character', …)` 會把卡片本體當成一個 `source: 'card'` 的項目
+  加進清單（**加在最後**，所以既有插圖永遠優先），客戶端因此不必為 PNG 卡多寫一條路徑；
+  而它在插圖管理器裡**不給刪**（那不是 `art/` 底下的東西）。
+- 新的讀取路由 `/api/dsh-tavern/card/<角色 id>`（跟插圖、附件同一套圍籬與 etag）。
+- 卡片區塊只有一個（測試釘住）：寫回是**換掉**，不是再接一個。
+
+> ⚠️ **宿主半改了**（`workspace.js` ＋ 新路由），要重啟 `dsh web`。
+> 既有的酒館不受影響：`.json` 卡照舊讀寫；`originals/` 只留著舊資料，新匯入不再寫它。
+
+## 2.6.44 — 新酒館／新房間的預設（裝修接回來、預設卡片連圖、預設房間）
+
+使用者：「我們不是應該有一個新房間預設的嗎？還有就是酒館老闆娘應該也有一個預設，
+他連同圖片也一起是預設的，留意他的提示詞要寫進 PNG 卡片當中」
+＋「我的意思是新酒館和新房間都應該要有一個預設，預設 css、預設卡片」。
+
+### ① 預設的老闆娘：**從出貨的 PNG 卡讀出來**，而且那張 PNG 就是她的立繪
+
+以前 `seed()` 只寫一份 `characters/老闆娘.json`（來自 `defaultCharacter()`），
+而出貨那張 `samples/characters/老闆娘.png`（4.27 MB、1600×2149、V3 卡）**只是躺在
+repo 裡，新酒館拿不到**——所以預設角色**沒有臉**（畫面永遠是字母頭像）。
+
+現在改成：
+
+- **提示詞住在卡片裡**：`seed()` 讀 `samples/characters/老闆娘.png` 的 `ccv3` 區塊，
+  用它產生 `characters/老闆娘.json`。也就是說「卡片是唯一真相」——改卡片不必改程式。
+- **同一張 PNG 就是她的立繪**：複製到 `art/characters/老闆娘/老闆娘.png` 並指定為主圖
+  （海報牆、訊息頭像、卡司清單都用它）。
+- ⚠️ **出貨檔不在時要能退回純資料**（例如 `npm publish` 少了 `samples/`）：
+  沒有圖的預設角色仍然可用，不可以讓「新增酒館」失敗。
+  `package.json` 的 `files` 補上 `samples/characters/老闆娘.png`，`verify.mjs` 也加一條
+  盯著它——**漏掉它在 `link:` 安裝時完全看不出來**（跟先前漏 `lib/*.js` 同一個症狀）。
+
+### ② 新酒館附**一間可以直接聊的房間**
+
+以前新酒館的「💬 包廂」是空的，要自己按 ＋ 新對話。現在 `seed()` 會順手開一間：
+房名 `老闆娘-xxxx`（`createRoom` 的隨機尾巴），而且 `chat.jsonl` 裡**已經有開場白**
+（卡片的 `first_mes`）——打開就能開始。
+
+⚠️ **只有「這一輪真的建了老闆娘」才建房間**：既有的資料夾（使用者自己的角色）
+不會被塞一間莫名其妙的房。測試從 `seed()` 的回報清單直接驗。
+
+### ③ 「裝修」那條鏈**從來沒有接上**（theme.json／custom.css 一直是死的）
+
+使用者：「注意一下我們的客戶訂製 css 的功能」。查下去不是「不夠好」，是**沒接**：
+`ensureTheme()` → `rpc('theme.read')` → `applyTheme()` → `applyCustomCss()` 整條鏈
+**沒有任何呼叫者**（`git show 2.6.9:lib/client.js` 也一樣）。所以畫面用的永遠是
+client 內建的 fallback 色票，`custom.css` 那一層 `<style>` 一直是空的。
+
+為什麼一直沒被發現：純函式（`scopeCustomCss`／`themeToCss`／`normalizeTheme`）都有測試、
+宿主 op 也在（用 RPC 手打得到內容），**只有「有沒有人呼叫」這件事沒有任何測試釘住**；
+而當時的驗證是「在 devtools 手改 token 那一層」——那證明的是 CSS 變數會生效。
+
+修法：在**兩個讀得到 `activeId` 的地方**各呼叫一次（`ensureTheme` 自己按酒館 id 去重）：
+
+1. 側邊欄酒館街的清單讀完之後（比主面板早，展開就看得到正確外觀）
+2. 主面板／對話頁的 `loadTavernData`（`tavern.list` 回來就套）
+
+### ④ 新酒館附一份 `custom.css` 範本（預設 CSS）
+
+`seed()` 會附一份**整份註解掉**的 `custom.css`（`CUSTOM_CSS_TEMPLATE`，住在
+`lib/theme.js`）：代價是零（沒有一條生效的規則，實測外觀不變），但功能看得見，
+而且範本裡**列了常用類別**（含這一輪新增的 `.dsh-tv-modelRoot`／`.dsh-tv-modelCell`／
+`.dsh-tv-attachBtn`…）。**只在新建時給**，既有酒館不補。
+
+### ⑤ 酒館資料夾裡的 `README.txt` 也過期了
+
+它是使用者打開資料夾時**唯一會看到**的說明，可是寫的還是舊佈局
+（`chats/<角色>/<對話名>.jsonl`）。現在改成房間＝資料夾的現況
+（`room.json`／`chat.jsonl`／`art/`／`files/`）＋ 裝修那兩層 ＋ 「資料夾名是房間 id，
+改名只動 `room.json`」。測試直接從 README 斷言。
+
+### 驗證
+
+- **離線端到端**（`node` 直接開一間 temp 酒館）：回報清單 ＝
+  `characters/老闆娘.json`、`worldbooks/酒館.json`、`worldbooks/輸出格式.json`、
+  `chats/老闆娘/<id>/chat.jsonl`、`custom.css`；立繪 4.27 MB 且是主圖；
+  房間裡 1 則訊息（開場白，開頭「門上的銅鈴響了一聲」）；`counts` ＝
+  `{characters:1, worldbooks:2, chats:1, art:1}`。
+- **裝修實測**（用暫時的酒館，不碰使用者的）：`custom.css` 的
+  `.dsh-tv-bubble{border-radius:3px}` 讓兩顆氣泡都變 **3px**；`theme.json` 的
+  `radius-md:18px`／`accent:#3ec46d`／`style.bubble:"tail"` 分別量到
+  **18px／#3ec46d／`--dsh-tv-bubble-tail: block`**。
+- `npm test` 九套全綠（新增：`verify` 盯著出貨卡在 `files` 裡；`test-workspace` 12 驗
+  「種子卡 ＝ PNG 裡的卡」「立繪是那張 PNG 且是主圖」「房間有開場白」；
+  `test-client` 14k 驗「`ensureTheme` 至少兩個呼叫點」）。
+
+> ⚠️ **宿主半（`lib/workspace.js`）改了，要重啟 `dsh web`** 才會生效。
+> 客戶端那一半（`ensureTheme`）重新載入頁面就生效。
+
+## 2.6.43 — 對話框的模型與思考強度（使用者：「這些還未做好」）
+
+使用者說「我們先完成了對話框吧，現在的選擇模型、思考強度這些還未做好」。
+下去量之後確認：**選單點開會讓整個 `main` 面板消失**，而且**全新的房根本沒有思考強度可選**。
+
+### ① ⚠️ 點開模型選單 → 整個面板消失（第三次空白頁）
+
+在真頁面上重現，console 只有一行：
+
+```
+TypeError: Cannot read properties of null (reading 'provider')
+slot entry crashed in 'main'
+```
+
+原因：chip 的 `title` 寫成「有 `chat.modelCurrent` 就讀 `route.provider`」，而
+**`modelCurrent` 有值、`route` 是 `null`** 是常態（全新的房、還沒讀到用量），
+於是 render 直接丟錯。而 `modelCurrent` 會在**點開選單**時被寫入（`loadModels()`
+把目錄的 default 寫進去）——所以「點開選單」正好是觸發那條路徑的動作。
+
+修法有兩層（都做了，因為兩層都是同一個設計味道）：
+
+- chip 的 `title` **只從 `selection` 取值**，不再從 `route` 讀欄位；`selection`
+  由 `currentSelection()` 統一組出來（`modelCurrent` → `usage.route` → 目錄 default）。
+- 目錄的 default **不再寫進 `modelCurrent`**，改成獨立的一格 `chat.modelDefault`，
+  只當**最低優先的後備**。先前它會蓋掉 `loadMessages()` 從訊息裡讀到的真實路由。
+
+### ② 思考強度（推理等級）在全新的房永遠不出現
+
+等級那一層原本掛在「用量列讀到的路由」上（`if (current)`，而 `current` 只認
+`chat.usage.route`）。全新的房沒有 session、沒有用量 → **一列都不打勾 → 等級那層
+永遠不展開**。現在「選中與否」用 **provider ＋ model 兩個欄位**比對，來源是
+`currentSelection()`（含目錄 default），所以一進房、一開選單就看得到。
+
+### ③ chip 上看不到「現在用什麼」
+
+- chip 現在是 **模型顯示名稱 ＋ 思考強度**（DSH 的 `triggerLabel` ＋ `triggerEffort`）：
+  `DeepSeek-V41-Flash Max`。先前只寫模型 **id**、而且完全沒有等級那一格。
+- 「現在選什麼」改成讀 **session 的 `modelSelection` 投影**（DSH 自己的 chip 讀的是
+  同一份：`binding(sessionId).session.projections.faceOf('modelSelection')` →
+  `getSnapshot()` → `next ?? lastUsed`）。好處是**重新整理之後仍然正確**，
+  而且與 DSH 原生介面共用同一份狀態。整個讀取包在 try/catch 裡——它是選配的
+  資訊來源，讀不到就退回訊息裡的 `extra.route`，**不可以把對話頁弄倒**。
+  因此在 `loadUsage` 順手把目錄讀起來（只讀一次、快取），chip 才有名字與等級可顯示。
+
+### ④ 全新還沒聊過的房也可以先選模型
+
+房間 ↔ session 是一對一，而模型選擇是**記在 session 上**的，所以先前在全新的房
+按下去只會得到「這一間房還沒有 DSH 對話——先送一句話再換模型」。現在挑模型會
+**順手把 session 開起來**（走 `ensureChatSession` 這一條既有入口，不另寫一套）。
+
+### ⑤ 換模型時等級會**收斂**（不然就是「選了卻沒生效」）
+
+照 DSH 的規則重寫（`choices` / `currentChoice` / `effectiveEffort` / `effortChoices`）：
+
+- 只挑模型 → **保留目前那一級**，但要在新模型上合法，否則用新模型的 `defaultEffort`。
+- 「提供方預設」那一列**只在模型沒有 `defaultEffort` 時**出現。
+- **完全沒有 `reasoning` 這一層的模型** → 沒有等級可選，chip 上也不顯示那一格。
+- 選單右緣**對齊 chip**：用「卡片右緣 − chip 右緣」算，不必 portal、不必算視窗座標
+  （實測 `anchorDelta = 0`；先前那兩招都會把面板丟到畫面外）。
+
+### 測試與實測
+
+- `test-client.mjs` **14k**：9 組純函式斷言（含「同一個 model id 在兩個提供方底下」、
+  形狀壞掉不能丟錯）＋ 6 條原始碼斷言（那條 null 讀取不可以回來、等級要走
+  `effortOptionsOf`、死掉的 `chat.modelRect` 不該還在）。**測試抓到自己實作跟 DSH
+  不一致的地方**：`reasoning: {}`（有這一層但空的）該顯示「提供方預設」而不是不顯示。
+- 這一段全部抽成**模組層級的純函式**（`modelKeyOf`／`effortOptionsOf`／`resolveEffortFor`…）
+  ——它原本住在 render 裡，而那裡出錯的代價是**整頁消失**。
+- 真頁面實測：全新的房開選單（打完勾、4 個等級列出來、`slots` 沒有掉、console 零錯誤）；
+  選 `Max` → chip 變 `DeepSeek-V41-Flash Max`、notice 正確；**重新整理之後 chip 仍是
+  `DeepSeek-V41-Flash Max`**（讀回 session 投影）；換到 `DeepSeek-V4-Pro` 等級保留（合法）；
+  換房間看到**各自**的模型（另一間 `DeepSeek-V41-Flash High`，這一間 `DeepSeek-V4-Pro Max`）；
+  送一輪之後 `chat.jsonl` 的 `extra.route` 是
+  `{"provider":"deepseek-official","model":"deepseek-v4-pro","effort":"max"}`
+  ——**思考強度真的進了那一輪請求**。
+
+> 這一版**只動瀏覽器半**：重新載入頁面就生效，不必重啟 `dsh web`。
+
+### 追加（同一天，使用者貼了 DSH 那顆 chip 的 DOM：「他的 ui ux 做得比較流暢」）
+
+照 DSH 的 `ui-model-selection` **逐項對齊**（讀它的 `client.js` 與
+`ModelSelect.module.css`）：先前那一版是自己刻的，功能對但**結構與互動都不像**。
+
+| 地方 | 先前 | 現在（照 DSH） |
+|---|---|---|
+| chip 結構 | 只有文字 ＋ chevron | `root` 包住 trigger：**圖示**（`IconDataOutline16`）＋ `triggerLabel` ＋ `triggerEffort` ＋ chevron |
+| chip 的 `title` | 一整句中文 | **`模型名 · 等級`**（DSH 的 `triggerLabel`，中間是 `·`） |
+| 無障礙 | 沒有 | `aria-label`＝「選擇模型，目前 X，推理等級 Y」（DSH 的 `triggerAria`）＋ `aria-haspopup`／`aria-expanded` |
+| 選單 | **一層**：等級縮排掛在選中的模型底下 | **兩層**：第一層兩列 `cell`（模型／推理等級，右邊各一個 `›`）→ 點進去才是清單 |
+| 選項 | 只是按鈕 | `role="menuitemradio"` ＋ `aria-checked`（模型與等級同一種列） |
+| 選單寬度 | 固定 320px | `width:max-content`、`min-width:min(240px,…)`、`max-width:min(320px,…)`（DSH 的 `.menu`） |
+| 位置 | 量「卡片右緣 − chip 右緣」再設 `right:Npx` | **不必量了**：選單住進 `.dsh-tv-modelRoot`，`right:0` 就貼齊 chip（實測右緣差 **0px**） |
+| 已經選的那一個 | 還是送一次請求 ＋ 跳通知 | **只把選單關掉**（DSH 的 `choose`：不送多餘的請求） |
+| 用詞 | 「思考強度」 | **「推理等級」**（DSH 的 `menu.effort`） |
+| chip 寬度 | `max-width:180px` | `min(320px,45vw)`——180px 會把等級擠成一個字（實測 `Max` → `M`） |
+
+死碼也一起清掉：`measureModelAnchor()` 與 `chat.modelAnchor`（有了 root 就不必量座標）。
+
+真頁面實測（`slots` 沒有掉、console 零錯誤）：chip 子節點＝圖示(16px) ＋
+`DeepSeek-V4-Flash`(114px) ＋ `Max`(24px) ＋ chevron(14px)，`title`＝
+`DeepSeek-V4-Flash · Max`、`aria-label`＝「選擇模型，目前 DeepSeek-V4-Flash，推理等級 Max」；
+第一層選單＝「模型 DeepSeek-V4-Flash ›」「推理等級 Max ›」、`role=menu`、
+`aria-label=模型與推理等級`；點「模型」→ 4 列（目前那列 `aria-checked=true`）；
+點「推理等級」→ Off/Low/High/Max（Max 打勾）→ 選 Low → chip 變
+`DeepSeek-V4-Flash Low`；**點已經選中的那一個 → 只關閉、不跳通知**。
+
 ## 2.6.42 — 附件（上傳檔案與圖片）
 
 使用者回報「沒法選擇模型和上傳檔案」。模型那一半 2.6.22–2.6.41 已經做完，**這一版補上
