@@ -349,7 +349,7 @@ function pngCard(entries) {
   assert.equal(book.value, '測試世界')
   assert.equal(existsSync(join(shop, 'worldbooks', '測試世界.json')), true)
 
-  const chat = await callRpc('chat.create', { character: '測試角色', name: '初次見面' })
+  const chat = await callRpc('room.create', { character: '測試角色', name: '初次見面' })
   assert.equal(chat.ok, true, '開新對話應該成功：' + chat.error)
   // 房間＝一個資料夾（`chats/<角色>/<roomId>/`），**身分是 id、不是名字**
   // ——那正是這個佈局的目的（改名不用搬任何東西）。見 docs/room-layout.md。
@@ -578,7 +578,7 @@ function pngCard(entries) {
 {
   // 房間的圖**跟著房間走**：`chats/<角色>/<roomId>/art/`（**不在 `art/` 底下**）。
   // 所以 owner 要用**房間 id**，不是顯示名稱——名稱不是身分。
-  const rooms = await callRpc('chat.list')
+  const rooms = await callRpc('room.list')
   const roomId = rooms.value[0].room
   const chatOwner = '測試角色/' + roomId
 
@@ -602,7 +602,7 @@ function pngCard(entries) {
   // ⚠️ 房間的插圖在房間資料夾裡（`chats/<角色>/<roomId>/art/`），所以舊的
   // `art/chats/<assetId>/` 那條路會在客戶端切過去（階段 4b）之後一起換掉——
   // 這一條先釘「清單帶得出身分」。
-  const chats = await callRpc('chat.list')
+  const chats = await callRpc('room.list')
   assert.equal(typeof chats.value[0].room, 'string', '清單要帶房間 id')
   assert.equal(chats.value[0].name, '初次見面', '顯示名稱是使用者給的那個')
   // ⚠️ `assetId` 現在仍然由**顯示名稱**那條舊規則正規化而來，而且插圖還在上傳到
@@ -689,23 +689,55 @@ function pngCard(entries) {
   // 涵蓋不到——直接在這裡驗它真的存在、而且真的會寫檔。
   const sessionShop = mkdtempSync(join(tmpdir(), 'tavern-session-shop-'))
   await callRpc('tavern.add', { path: sessionShop })
-  const made = await callRpc('chat.create', { character: '老闆娘', name: '夜晚' })
+  const made = await callRpc('room.create', { character: '老闆娘', name: '夜晚' })
   assert.equal(made.ok, true, '先開一份對話：' + made.error)
 
   const SID = 'session-aaaa1111-bbbb-2222-cccc-333344445555'
+  /**
+   * ⚠️ **`room` 與 `chat` 是兩個不同的東西，把它們分開才是這一節的重點。**
+   *
+   * 這一條以前送的是 `chat: <房間 id>`（把 id 塞進顯示名稱那一格，`room` 留空），
+   * 因為當時 `session.bind` **根本沒有轉送 `args.room`**。那讓三個地方一起壞掉，
+   * 而且全部是**無聲**的（2026-09-23 在真的 GUI 裡才發現）：
+   *
+   *   1. agent 面的 `roomJson()` 拿顯示名稱去當資料夾名 → `room.json` 永遠找不到
+   *      → **每房的工具權限、「這一場的指示」、生成參數全部不生效**
+   *   2. `stampChatSessionId` 走 `resolveRoom`（只認 id）→ 傳顯示名稱就丟錯、
+   *      被 `catch` 吃掉 → `chat.jsonl` 的 `dsh_session_id` **從來沒被寫進去過**
+   *   3. 上面那兩件事都靠 `stamped: true` 這條斷言照樣變綠（因為它傳的是 id）
+   *
+   * 所以這一節現在**故意用真實的形狀**：`room` 放 id、`chat` 放顯示名稱。
+   */
+  const displayName = made.value.name
   const bound = await callRpc('session.bind', {
     sessionId: SID,
     character: '老闆娘',
-    // ⚠️ 送**房間 id**（`room`），不是顯示名稱：`resolveRoom` 只認 id
-    // ——同名可以有兩間房，名字不當身分。
-    chat: made.value.room,
+    room: made.value.room,
+    chat: displayName,
   })
   assert.equal(bound.ok, true, 'session.bind 應該存在而且成功：' + bound.error)
   assert.equal(bound.value.character, '老闆娘')
-  assert.equal(bound.value.stamped, true, '順手要把 session id 蓋進對話檔的標頭')
+  assert.equal(bound.value.room, made.value.room, 'room 要存**房間 id**（agent 面靠它讀 room.json）')
+  assert.equal(bound.value.chat, displayName, 'chat 要存**顯示名稱**（清單比對用）')
+  assert.notEqual(displayName, made.value.room, '⚠️ 這兩個值本來就不一樣，測試才驗得出東西')
+  assert.equal(bound.value.stamped, true, '順手要把 session id 蓋進對話檔的標頭（用房間 id 蓋）')
+  // 蓋進去的東西要真的在檔案裡——`stamped: true` 只是回報，這才是事實。
+  const header = JSON.parse(readFileSync(join(sessionShop, 'chats', '老闆娘', made.value.room, 'chat.jsonl'), 'utf8').split('\n')[0])
+  assert.equal(
+    header.chat_metadata?.dsh_session_id,
+    SID,
+    '⚠️ 對話檔的標頭要真的有 dsh_session_id（`session.rebuild` 靠它重建索引）',
+  )
+  // agent 面讀每房設定的那一條路：`chats/<角色>/<room>/room.json` 必須真的存在。
+  assert.equal(
+    existsSync(join(sessionShop, 'chats', '老闆娘', bound.value.room, 'room.json')),
+    true,
+    '⚠️ 綁定的 room 要指到真的資料夾，不然每房設定永遠讀不到',
+  )
 
   const read = await callRpc('session.read', { sessionId: SID })
-  assert.equal(read.value?.chat, made.value.room, '讀得回來')
+  assert.equal(read.value?.room, made.value.room, '讀得回來（room）')
+  assert.equal(read.value?.chat, displayName, '讀得回來（chat）')
 
   const listed = await callRpc('session.list', {})
   assert.equal(listed.value.length, 1, '清單要有一筆')
@@ -716,11 +748,25 @@ function pngCard(entries) {
   assert.equal((await callRpc('session.read', { sessionId: SID })).value, null, '解綁之後讀不到')
   const rebuilt = await callRpc('session.rebuild', {})
   assert.equal(rebuilt.value.rebuilt, 1, '要從對話檔的標頭重建一筆')
-  assert.equal(
-    (await callRpc('session.read', { sessionId: SID })).value?.character,
-    '老闆娘',
-    '重建之後要指回同一個角色',
-  )
+  const back = (await callRpc('session.read', { sessionId: SID })).value
+  assert.equal(back?.character, '老闆娘', '重建之後要指回同一個角色')
+  // ⚠️ **重建也要重建出 `room`**：只認得 `chat` 的話，重建完的索引又會退回
+  //    「顯示名稱當資料夾名」那個壞掉的世界。標頭裡要留得住房間 id。
+  assert.equal(back?.room, made.value.room, '⚠️ 重建之後 room 也要對（不然每房設定又壞了）')
+
+  // 舊形狀（只有 `chat`、而且放的是房間 id）也**不可以**壞：那是已經裝好的
+  // 使用者手上正在用的形狀。`stampChatSessionId` 有 `record.room || record.chat` 的退回。
+  const LEGACY = 'session-bbbb2222-cccc-3333-dddd-444455556666'
+  const legacyRoom = await callRpc('room.create', { character: '老闆娘', name: '舊形狀' })
+  const legacyBound = await callRpc('session.bind', {
+    sessionId: LEGACY,
+    character: '老闆娘',
+    chat: legacyRoom.value.room,
+  })
+  assert.equal(legacyBound.ok, true, '舊形狀（只有 chat）要繼續可用：' + legacyBound.error)
+  assert.equal(legacyBound.value.room, '', '舊形狀沒有 room')
+  assert.equal(legacyBound.value.stamped, true, '舊形狀要靠 `record.chat` 那條退回才蓋得進去')
+  await callRpc('session.unbind', { sessionId: LEGACY })
 
   // 路徑跳脫：sessionId 會變成檔名，`../` 一定要擋下來。
   const escaped = await callRpc('session.bind', { sessionId: '../escape', character: '老闆娘', chat: '夜晚' })
@@ -729,7 +775,7 @@ function pngCard(entries) {
 
   await callRpc('tavern.remove', { id: 'session-shop' })
   rmSync(sessionShop, { recursive: true, force: true })
-  console.log('11b. session 對照表 OK — 綁定／讀取／解綁／重建／路徑防護')
+  console.log('11b. session 對照表 OK — room／chat 分開、標頭真的蓋進去、重建保得住 room、舊形狀不壞')
 }
 
 /* --- 11c. 插件自己裝 preset（不在啟動時裝）------------------------------- */
@@ -767,7 +813,7 @@ function pngCard(entries) {
 {
   const deleteShop = mkdtempSync(join(tmpdir(), 'tavern-delete-shop-'))
   await callRpc('tavern.add', { path: deleteShop })
-  const made = await callRpc('chat.create', { character: '老闆娘', name: '要刪的' })
+  const made = await callRpc('room.create', { character: '老闆娘', name: '要刪的' })
   assert.equal(made.ok, true, '先開一份對話：' + made.error)
 
   const bound = await callRpc('session.bind', {
@@ -777,11 +823,11 @@ function pngCard(entries) {
   })
   assert.equal(bound.ok, true, '先綁一個 session：' + bound.error)
 
-  const dropped = await callRpc('chat.delete', { character: '老闆娘', chat: made.value.room })
-  assert.equal(dropped.ok, true, 'chat.delete 應該存在而且成功：' + dropped.error)
+  const dropped = await callRpc('room.delete', { character: '老闆娘', room: made.value.room })
+  assert.equal(dropped.ok, true, 'room.delete 應該存在而且成功：' + dropped.error)
   assert.deepEqual(dropped.value.unbound, ['session-smoke-delete-0000-1111-222233334444'], '要回報解掉了哪個 session')
   // ⚠️ 不是 0：新建酒館本來就附一間預設房（見 §4），所以剩下的應該正好是它。
-  const leftRooms = (await callRpc('chat.list', {})).value
+  const leftRooms = (await callRpc('room.list', {})).value
   assert.equal(leftRooms.length, 1, '只剩新建時附的那一間預設房：' + JSON.stringify(leftRooms.map((r) => r.name)))
   assert.equal(leftRooms[0].character, '老闆娘', '預設房是老闆娘的')
   assert.equal(
@@ -795,7 +841,7 @@ function pngCard(entries) {
   //
   // 措辭從「找不到這份對話」改成「找不到這間房」：東西現在是房間（資料夾），
   // 而契約是「明確失敗、訊息可行動」，不是那幾個字。訊息仍然帶著相對路徑。
-  const missing = await callRpc('chat.delete', { character: '老闆娘', chat: '不存在' })
+  const missing = await callRpc('room.delete', { character: '老闆娘', room: '不存在' })
   assert.equal(missing.ok, false, '刪不存在的對話要失敗')
   assert.match(String(missing.error), /找不到這間房/, '錯誤訊息要可行動：' + missing.error)
   assert.match(String(missing.error), /chats\//, '訊息要指出是哪個路徑：' + missing.error)
@@ -813,7 +859,7 @@ function pngCard(entries) {
   const attachShop = mkdtempSync(join(tmpdir(), 'tavern-attach-shop-'))
   const added = await callRpc('tavern.add', { path: attachShop })
   const tavernId = added.value.added.id
-  const made = await callRpc('chat.create', { character: '老闆娘', name: '附件房' })
+  const made = await callRpc('room.create', { character: '老闆娘', name: '附件房' })
   assert.equal(made.ok, true, '先開一間房：' + made.error)
   const room = made.value.room
 
@@ -930,6 +976,80 @@ function pngCard(entries) {
   console.log('11e. 附件 OK — 上傳／編號／列出／讀取／刪除／訊息帶 media 都通過')
 }
 
+/* --- 11f. 生成參數走真的 HTTP 一圈（數字要在 JSON 裡活著）----------------- */
+{
+  // 為什麼要特地繞一圈真的 route：**數字與字串在這一層最容易被弄丟**。
+  // 客戶端送的是 `{ temperature: 0.8 }`（`JSON.stringify` 之後是數字），
+  // 而輸入框給的是字串 `"0.8"`；兩邊都該收，但**存進檔案、再讀回來**之後
+  // 必須還是同一個意思。`test-workspace.mjs` 驗的是函式層，這一條驗的是
+  // 「經過 HTTP ＋ JSON 之後還是不是那個值」。
+  const sampleShop = mkdtempSync(join(tmpdir(), 'tavern-sampling-shop-'))
+  const added = await callRpc('tavern.add', { path: sampleShop })
+  const tavernId = added.value.added.id
+
+  // ① 數字進、數字出。
+  const saved = await callRpc('settings.write', {
+    id: tavernId,
+    patch: { temperature: 0.8, maxTokens: 512 },
+  })
+  assert.equal(saved.ok, true, 'settings.write 應該成功：' + saved.error)
+  assert.equal(saved.value.temperature, 0.8, 'temperature 要是數字 0.8，不是字串')
+  assert.equal(saved.value.maxTokens, 512, 'maxTokens 要是數字 512')
+
+  // ② 讀回來也一樣（`settings.read` 是另一個 op，走另一條路）。
+  const read = await callRpc('settings.read', { id: tavernId })
+  assert.equal(read.ok, true, 'settings.read 應該成功：' + read.error)
+  assert.equal(read.value.temperature, 0.8, '讀回來還是 0.8')
+  assert.equal(read.value.maxTokens, 512, '讀回來還是 512')
+  assert.equal(typeof read.value.temperature, 'number', '型別也要對（不是 "0.8"）')
+
+  // ③ 數字字串也收（`<input type="number">` 給的就是字串）。
+  const fromString = await callRpc('settings.write', {
+    id: tavernId,
+    patch: { temperature: '1.25' },
+  })
+  assert.equal(fromString.value.temperature, 1.25, '數字字串要收下來並變成數字')
+  assert.equal(fromString.value.maxTokens, 512, '沒送的那一欄不可以被清掉')
+
+  // ④ 不合法 → 回報 `dropped`，**而且原本的值要活著**。
+  const refused = await callRpc('settings.write', { id: tavernId, patch: { temperature: 9 } })
+  assert.equal(refused.ok, true, '不合法不是「失敗」——是「這幾個值沒存」（回報在 dropped）')
+  assert.equal(refused.value.temperature, 1.25, '不合法的那一欄要保留原本的值')
+  assert.deepEqual(
+    (refused.value.dropped ?? []).length,
+    1,
+    '要回報一個被丟掉的欄位：' + JSON.stringify(refused.value.dropped),
+  )
+
+  // ⑤ 清除：送 `null` ⇒ 讀回來是 `null`（不是 0、也不是欄位消失）。
+  const cleared = await callRpc('settings.write', { id: tavernId, patch: { temperature: null } })
+  assert.equal(cleared.value.temperature, null, 'null ＝ 沒有設定')
+  const reread = await callRpc('settings.read', { id: tavernId })
+  assert.equal(reread.value.temperature, null, '讀回來也要是 null')
+
+  // ⑥ 房間層：同一條路，而且 `null` ＝ 聽酒館的（清單要原樣帶出來）。
+  await callRpc('settings.write', { id: tavernId, patch: { temperature: 0.7 } })
+  const room = await callRpc('room.create', { id: tavernId, character: '老闆娘', name: '參數房' })
+  assert.equal(room.ok, true, '先開一間房：' + room.error)
+  const roomSaved = await callRpc('room.write', {
+    id: tavernId,
+    character: '老闆娘',
+    room: room.value.room,
+    patch: { temperature: 1.3 },
+  })
+  assert.equal(roomSaved.value.temperature, 1.3, '房間的 temperature 要存得進去')
+  assert.equal(roomSaved.value.maxTokens, null, '房間沒設的那一欄是 null（＝聽酒館的）')
+  const rooms = await callRpc('room.list', { id: tavernId, character: '老闆娘' })
+  const one = rooms.value.find((entry) => entry.room === room.value.room)
+  assert.ok(one !== undefined, '剛開的房間要在清單裡')
+  assert.equal(one.temperature, 1.3, '清單要帶房間自己的值')
+  assert.equal(one.maxTokens, null, '⚠️ 清單不可以把酒館的 512 填進來（那就分不出「有沒有設」）')
+
+  await callRpc('tavern.remove', { id: tavernId })
+  rmSync(sampleShop, { recursive: true, force: true })
+  console.log('11f. 生成參數 OK — 走真的 HTTP：數字／字串都收、null 來回、壞值回報且不覆蓋')
+}
+
 /* --- 12. 跨半契約：瀏覽器半呼叫的每個 op 都必須存在於宿主半 ---------------- */
 {
   // 這一條是為了「＋ 新增角色」那個 bug：面板呼叫 `character.create`，
@@ -959,6 +1079,56 @@ function pngCard(entries) {
   }
   assert.deepEqual(missing, [], '這些 op 面板會呼叫、宿主半卻沒有：' + missing.join(', '))
   console.log('12. 跨半契約 OK —', String(called.size), '個 rpc op 都存在於宿主半')
+}
+
+/* --- 12b. 6b：`chat.*` 那六個相容 op 已經拆掉，不可以再長回來 --------------- */
+{
+  // 為什麼要專門釘這一條：`chat.*` 與 `room.*` 是**等價的別名**，所以
+  // 「不小心又加回一個」在功能上完全看不出來——測試會全綠、畫面也正常，
+  // 悄悄回來的只有「同一個東西又有兩組名字」這件事。而它一旦回來，
+  // 下一個改房間的人就有機會只改一邊。
+  const LEGACY = [
+    'chat.list',
+    'chat.create',
+    'chat.delete',
+    'chat.rename',
+    'chat.append',
+    'chat.messages',
+  ]
+  const alive = []
+  for (const op of LEGACY) {
+    const probe = await callRpc(op, {})
+    // 「不認識這個 op」才代表它真的不在了；「還沒有選定酒館」那種失敗不算。
+    if (!(probe.ok === false && String(probe.error).includes('unknown op'))) alive.push(op)
+  }
+  assert.deepEqual(alive, [], '這幾個相容 op 應該已經不存在了：' + alive.join(', '))
+
+  // ⚠️ **這一半才是真正的安全網**：宿主半拆了、客戶端還在送，症狀是
+  // 「按了沒反應」（畫面收到 `unknown op`），而不是紅字的測試。
+  const clientSource = readFileSync(new URL('./lib/client.js', import.meta.url), 'utf8')
+  const stale = [...clientSource.matchAll(/\b(?:rpc|sendFileExpectOk|sendFile)\s*\(\s*'(chat\.[a-zA-Z]+)'/g)].map(
+    (match) => match[1],
+  )
+  assert.deepEqual(stale, [], '客戶端還在呼叫已經拆掉的 op：' + stale.join(', '))
+
+  // 反過來也要確認：拆掉的是**名字**，不是功能——`room.*` 這一組一個都不能少。
+  const ROOMS = [
+    'room.list',
+    'room.create',
+    'room.read',
+    'room.write',
+    'room.rename',
+    'room.delete',
+    'room.messages',
+    'room.append',
+  ]
+  const gone = []
+  for (const op of ROOMS) {
+    const probe = await callRpc(op, {})
+    if (probe.ok === false && String(probe.error).includes('unknown op')) gone.push(op)
+  }
+  assert.deepEqual(gone, [], '這幾個 room.* op 必須存在：' + gone.join(', '))
+  console.log('12b. 6b 收尾 OK — chat.* 六個已拆、客戶端一個都沒在送、room.* 八個都在')
 }
 
 /* --- 13. 原子寫入：真的把行程殺掉，檔案不能壞 ---------------------------- */
@@ -1433,9 +1603,9 @@ function pngCard(entries) {
   // 這是這個佈局的核心好處：同名不再是衝突，也就不需要 `-2`／`-3` 那種自動編號
   // ——那正是「用名字當身分」才會有的問題（舊的 `createChat` 就是那樣，而且改名
   // 還要同時搬四處路徑，見 docs/room-layout.md）。
-  const first = await callRpc('chat.create', { character: '碰撞角色', name: '初次見面' })
-  const second = await callRpc('chat.create', { character: '碰撞角色', name: '初次見面' })
-  const third = await callRpc('chat.create', { character: '碰撞角色', name: '初次見面' })
+  const first = await callRpc('room.create', { character: '碰撞角色', name: '初次見面' })
+  const second = await callRpc('room.create', { character: '碰撞角色', name: '初次見面' })
+  const third = await callRpc('room.create', { character: '碰撞角色', name: '初次見面' })
   const ids = [first, second, third].map((one) => one.value.room)
   assert.equal(new Set(ids).size, 3, '三次都要拿到不同的房間 id')
   for (const chat of [first, second, third]) {
@@ -1468,7 +1638,7 @@ function pngCard(entries) {
   // 而名字根本不是身分，所以同名完全不是問題。舊契約（檔名 `同時-2`…）驗的是
   // 「名字唯一」——那正是用名字當身分才會需要的東西。
   const raced = await Promise.all(
-    [0, 1, 2, 3].map(() => callRpc('chat.create', { character: '碰撞角色', name: '同時' })),
+    [0, 1, 2, 3].map(() => callRpc('room.create', { character: '碰撞角色', name: '同時' })),
   )
   const raceIds = raced.map((result) => result.value.room)
   assert.equal(new Set(raceIds).size, 4, '併發下四個 id 都要不一樣：' + raceIds.join(', '))

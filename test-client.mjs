@@ -662,7 +662,7 @@ const renderStreet = (extra = {}) =>
   const called = []
   __setRpc((op, args) => {
     called.push({ op, args })
-    if (op === 'chat.list') return Promise.resolve(chats)
+    if (op === 'room.list') return Promise.resolve(chats)
     if (op === 'tavern.list') {
       return Promise.resolve({ taverns: [{ id: 't1', name: '酒館', path: '/x', active: true, icon: '' }], activeId: 't1' })
     }
@@ -671,10 +671,10 @@ const renderStreet = (extra = {}) =>
 
   const SIDEBAR = { taverns: [{ id: 't1', name: '酒館', path: '/x', active: true, icon: '' }], loaded: true, reload: () => {}, wide: true, opened: true, onToggle: () => {} }
   const first = renderComponent(TavernStreet, SIDEBAR)
-  // 展開那一間（`state.expanded` 是空的，所以按下去會觸發 chat.list）。
+  // 展開那一間（`state.expanded` 是空的，所以按下去會觸發 room.list）。
   const row = collect(first, (el) => typeof el.props.className === 'string' && el.props.className.split(' ').includes('dsh-tv-row'))[0]
   row.props.onClick()
-  // 非同步的 chat.list 要跑完才有對話列。
+  // 非同步的 room.list 要跑完才有對話列。
   await new Promise((resolve) => setTimeout(resolve, 0))
 
   const tree = renderComponent(TavernStreet, SIDEBAR)
@@ -933,7 +933,7 @@ const A_CHAT = [
 function spyRpc(seen, extra) {
   exportsObject.__setRpc((op, args) => {
     seen.push({ op, args })
-    if (op === 'chat.list') return Promise.resolve(A_CHAT)
+    if (op === 'room.list') return Promise.resolve(A_CHAT)
     if (op === 'tavern.list') {
       return Promise.resolve({ taverns: [{ id: 't1', name: '酒館', path: '/x', active: true, icon: '' }], activeId: 't1' })
     }
@@ -943,7 +943,7 @@ function spyRpc(seen, extra) {
   })
 }
 
-/* ── 改名：按「改名」不送 op，改成行內輸入；Enter 才送 chat.rename ── */
+/* ── 改名：按「改名」不送 op，改成行內輸入；Enter 才送 room.rename ── */
 {
   const seen = []
   const { TavernStreet } = exportsObject.__components
@@ -951,12 +951,12 @@ function spyRpc(seen, extra) {
   exportsObject.__chat.setContext({
     get: (key) => (key === 'remote.session' ? { fork: () => Promise.resolve({ ok: true, value: { sessionId: 's' } }) } : undefined),
   })
-  spyRpc(seen, { 'chat.rename': () => ({ character: '老闆娘', name: '白天', file: '白天.jsonl', previous: '夜晚', sessionIds: [] }) })
+  spyRpc(seen, { 'room.rename': () => ({ character: '老闆娘', room: 'm1k3x9-a7f2', name: '白天' }) })
 
   const items = await menuItemsFor(MENU_SIDEBAR)
   assert.deepEqual(items.map((el) => fakeText(el)), ['改名', '分支', '刪除'], '名稱與順序照原生那三顆（改名／分支／刪除）')
   items[0].listeners.click[0]()
-  assert.equal(seen.filter((one) => one.op === 'chat.rename').length, 0, '按「改名」不該馬上送 op')
+  assert.equal(seen.filter((one) => one.op === 'room.rename').length, 0, '按「改名」不該馬上送 op')
 
   const tree = renderComponent(TavernStreet, MENU_SIDEBAR)
   const input = collect(tree, (el) => el.type === 'input')[0]
@@ -966,32 +966,36 @@ function spyRpc(seen, extra) {
   input.props.onKeyDown({ key: 'Enter', preventDefault() {} })
   await new Promise((resolve) => setTimeout(resolve, 0))
 
-  const call = seen.filter((one) => one.op === 'chat.rename').pop()
-  assert.ok(call !== undefined, 'Enter 之後要送 chat.rename')
+  const call = seen.filter((one) => one.op === 'room.rename').pop()
+  assert.ok(call !== undefined, 'Enter 之後要送 room.rename')
   assert.deepEqual(
-    [call.args.id, call.args.character, call.args.chat, call.args.name],
+    [call.args.id, call.args.character, call.args.room, call.args.name],
     ['t1', '老闆娘', 'm1k3x9-a7f2', '白天'],
-    'chat.rename 的參數：酒館 id／角色／**房間 id**（不是名字！）／新的名字',
+    'room.rename 的參數：酒館 id／角色／**房間 id**（不是名字！）／新的名字',
   )
+  // ⚠️ 舊的 `chat` 參數名**一定不可以再出現**：宿主半已經沒有 `chat.*` 這一組 op 了
+  // （2.6.46 的 6b），送舊名字會拿到 `unknown op`——那在畫面上是「按了沒反應」。
+  assert.equal('chat' in call.args, false, 'room.rename 不可以再帶舊的 chat 參數')
   exportsObject.__chat.setContext(null)
-  console.log('13a. 改名 OK — 按鈕只開行內輸入，Enter 才送 chat.rename（四個參數都對）')
+  console.log('13a. 改名 OK — 按鈕只開行內輸入，Enter 才送 room.rename（四個參數都對，沒有舊的 chat）')
 }
 
-/* ── 刪除：走已經驗過的 chat.delete ── */
+/* ── 刪除：走已經驗過的 room.delete ── */
 {
   const seen = []
   spyRpc(seen)
   const items = await menuItemsFor(MENU_SIDEBAR)
   items[2].listeners.click[0]()
   await new Promise((resolve) => setTimeout(resolve, 0))
-  const call = seen.filter((one) => one.op === 'chat.delete').pop()
-  assert.ok(call !== undefined, '「刪除」要送 chat.delete')
+  const call = seen.filter((one) => one.op === 'room.delete').pop()
+  assert.ok(call !== undefined, '「刪除」要送 room.delete')
   assert.deepEqual(
-    [call.args.id, call.args.character, call.args.chat],
+    [call.args.id, call.args.character, call.args.room],
     ['t1', '老闆娘', 'm1k3x9-a7f2'],
     '刪除的三個參數都要對（第三個是**房間 id**，不是名字）',
   )
-  console.log('13b. 刪除 OK — 選單上的刪除送 chat.delete（三個參數都對）')
+  assert.equal('chat' in call.args, false, 'room.delete 不可以再帶舊的 chat 參數')
+  console.log('13b. 刪除 OK — 選單上的刪除送 room.delete（三個參數都對）')
 }
 
 /* ── 分支：remote.session.fork → 新檔 → 把訊息寫過去 → 綁定 ── */
@@ -1009,13 +1013,13 @@ function spyRpc(seen, extra) {
         : undefined,
   })
   spyRpc(seen, {
-    'chat.create': () => ({
+    'room.create': () => ({
       character: '老闆娘',
       room: 'm1k3x9-fork',
       name: '夜晚-2',
       file: 'm1k3x9-fork/chat.jsonl',
     }),
-    'chat.messages': () => [{ name: '你', isUser: true, text: '嗨' }],
+    'room.messages': () => [{ name: '你', isUser: true, text: '嗨' }],
   })
 
   const items = await menuItemsFor(MENU_SIDEBAR)
@@ -1028,8 +1032,12 @@ function spyRpc(seen, extra) {
   const bindCall = seen.filter((one) => one.op === 'session.bind').pop()
   assert.ok(bindCall !== undefined, '分支完要把新 session 綁到新檔')
   assert.equal(bindCall.args.sessionId, 'session-forked', '綁的是分支出來的新 session')
-  assert.equal(bindCall.args.chat, 'm1k3x9-fork', '綁的是新開的那間房（房間 id，不是名字）')
-  const appendCall = seen.filter((one) => one.op === 'chat.append').pop()
+  // ⚠️ 兩個欄位都要對（2.6.49）：`room` 是**房間 id**（agent 面靠它讀 room.json），
+  // `chat` 是**顯示名稱**。以前這裡把房間 id 塞進 `chat`、`room` 留空——於是
+  // 分支出來的房間，每房設定一樣讀不到（跟主路徑同一個 bug）。
+  assert.equal(bindCall.args.room, 'm1k3x9-fork', '`room` 要送新開那間房的**房間 id**')
+  assert.equal(bindCall.args.chat, '夜晚-2', '`chat` 要送**顯示名稱**（不是 id）')
+  const appendCall = seen.filter((one) => one.op === 'room.append').pop()
   assert.ok(appendCall !== undefined, '分支要把目前看到的訊息一起分出去')
   assert.equal(appendCall.args.messages.length, 1, '一則訊息就寫一則')
   exportsObject.__chat.setContext(null)
@@ -1094,7 +1102,7 @@ function spyRpc(seen, extra) {
     hallTree,
     (el) => el.type === 'button' && String(el.props.className || '').indexOf('dsh-tv-zone') === 0,
   )
-  assert.deepEqual(tabs.map((one) => one.props.children), labels, '分區列要是那四個分頁')
+  assert.deepEqual(tabs.map((one) => one.props.children), labels, '分區列要是那五個分頁')
   assert.ok(hall.includes('店面圖'), '🏠 大廳要有店面圖（酒館自己的樣子）')
 
   // 一次只畫一個分區——這是「分區」的定義，不是實作細節。
@@ -1145,7 +1153,7 @@ function spyRpc(seen, extra) {
   )
 
   // 底部那三個入口按鈕**拿掉了**（使用者：「最下低那層不需要」），換成真的房間清單
-  // （`HallRooms`）。那個清單的資料要 `chat.list`，而載入住在 `useEffect`——
+  // （`HallRooms`）。那個清單的資料要 `room.list`，而載入住在 `useEffect`——
   // 離線的假 React 不跑 effect，所以這裡只驗「換掉了」與「沒有資料時畫得出東西」。
   const quick = collect(
     hallTree,
@@ -1173,6 +1181,709 @@ function spyRpc(seen, extra) {
     delete exportsObject.__testSeed[key]
   }
   console.log('4g. 大廳 OK — 快速入口會跳區、破壞性動作收在「進階」裡')
+}
+
+/* --------- ⚙️ 設定：persona 三個欄位與工具等級（補測試，2.6.47）--------- */
+
+{
+  /**
+   * ⚠️ 這一節是補上來的。`userName`／`userPersona`／`tavernPrompt`／`allowTools`
+   * 四個欄位在 2.6.5 就做好了，而**這四個在 `test-client.mjs` 裡一行斷言都沒有**
+   * ——連「欄位在不在畫面上」都沒人驗。
+   *
+   * 為什麼代價很大：`settings.write` 的路徑**只搬白名單裡的欄位**，
+   * 所以「欄位畫得出來」和「按了會送對東西」是兩件事，而且後者壞掉時畫面
+   * 看起來完全正常（`assets` 就是這樣壞過一次，見 `workspace.js` 的註解）。
+   *
+   * 對應的宿主半＋agent 面測試在 `test-agent.mjs` 第 10、11 節。
+   */
+  const { TavernSettingsPage } = exportsObject.__components
+  const { __setRpc } = exportsObject
+  const seen = []
+  __setRpc((op, args) => {
+    seen.push({ op, args })
+    if (op === 'settings.write') return Promise.resolve(Object.assign({}, args.patch))
+    return Promise.resolve({})
+  })
+  Object.assign(exportsObject.__testSeed, {
+    loaded: true,
+    taverns: [{ id: 'tv-1', name: '測試酒館', active: true, exists: true, scaffolded: true, icon: '🍺' }],
+    activeId: 'tv-1',
+    characters: [],
+    summary: { name: 'tavern', counts: {}, files: [], layout: [] },
+    settings: {
+      name: '測試酒館',
+      note: '',
+      userName: '阿明',
+      userPersona: '話不多。',
+      tavernPrompt: '不談政治。',
+      allowTools: 'read',
+    },
+  })
+
+  reactImpl.resetHooks()
+  exportsObject.__setZone('settings')
+  const tree = renderComponent(TavernSettingsPage, {})
+  const byLabel = (label) =>
+    collect(tree, (el) => el.props !== undefined && el.props['aria-label'] === label)[0]
+
+  // ① 三個輸入欄位都在，而且**餵進去的值要顯示出來**（不是空白的）。
+  for (const [label, expected] of [
+    ['你的名字', '阿明'],
+    ['你是誰', '話不多。'],
+    ['這間店的規則', '不談政治。'],
+  ]) {
+    const field = byLabel(label)
+    assert.ok(field !== undefined, `⚙️ 設定要有「${label}」這個欄位`)
+    assert.equal(field.props.value, expected, `${label} 要顯示 tavern.json 裡的值`)
+  }
+
+  // ② 名字那一顆儲存只送 userName（不要順手把 persona 也蓋掉）。
+  byLabel('你的名字').props.onChange({ target: { value: '小美' } })
+  const nameSave = collect(
+    renderComponent(TavernSettingsPage, {}),
+    (el) => el.type === 'button' && el.props.children === '儲存名字',
+  ).pop()
+  assert.ok(nameSave !== undefined, '名字要有自己的儲存鈕')
+  nameSave.props.onClick()
+  const nameCall = seen.filter((one) => one.op === 'settings.write').pop()
+  assert.deepEqual(nameCall.args.patch, { userName: '小美' }, '名字只送 userName 一個欄位')
+
+  // ③ persona 與店規是**同一顆**「儲存這兩項」——兩個一起送。
+  //    （分開兩顆的話，改了一欄按另一顆就會把前一欄蓋回去。）
+  reactImpl.resetHooks()
+  exportsObject.__setZone('settings')
+  const tree2 = renderComponent(TavernSettingsPage, {})
+  const field2 = (label) =>
+    collect(tree2, (el) => el.props !== undefined && el.props['aria-label'] === label)[0]
+  field2('你是誰').props.onChange({ target: { value: '我是巡迴的藥商。' } })
+  const tree3 = renderComponent(TavernSettingsPage, {})
+  collect(tree3, (el) => el.props !== undefined && el.props['aria-label'] === '這間店的規則')[0].props.onChange(
+    { target: { value: '店裡沒有現代科技。' } },
+  )
+  const bothSave = collect(
+    renderComponent(TavernSettingsPage, {}),
+    (el) => el.type === 'button' && el.props.children === '儲存這兩項',
+  )[0]
+  assert.ok(bothSave !== undefined, 'persona 與店規要有一顆共同的儲存鈕')
+  bothSave.props.onClick()
+  const bothCall = seen.filter((one) => one.op === 'settings.write').pop()
+  assert.deepEqual(
+    bothCall.args.patch,
+    { userPersona: '我是巡迴的藥商。', tavernPrompt: '店裡沒有現代科技。' },
+    '一顆按鈕要同時送 persona 與店規（兩個都改過就要兩個都送）',
+  )
+
+  // ④ 工具等級：五個選項都在，而且值是**宿主半白名單裡的那五個**。
+  //
+  // `MapSelect` 畫的是一般的 `<select>` 包在 `<label>` 裡（標籤是那個 `<span>`），
+  // 所以用標籤文字找它——不要用 `aria-label`，它沒有。
+  const levelLabel = collect(
+    tree2,
+    (el) => el.props !== undefined && String(el.props.children) === '這個角色能用哪些工具（預設全關）',
+  )[0]
+  assert.ok(levelLabel !== undefined, '工具等級要有自己的欄位')
+  const levelSelect = collect(tree2, (el) => el.type === 'select')[0]
+  assert.ok(levelSelect !== undefined, '工具等級要是一個 select')
+  assert.equal(levelSelect.props.value, 'read', '要顯示 tavern.json 裡目前那一級')
+  const optionValues = collect(levelSelect, (el) => el.type === 'option').map((el) => el.props.value)
+  assert.deepEqual(
+    optionValues,
+    ['none', 'read', 'write', 'web', 'all'],
+    '五個等級都要在（值要跟宿主半的白名單一字不差）',
+  )
+
+  // ⑤ 原始碼那一半：`settings.write` 的欄位名。
+  //    這裡刻意**不驗**「有沒有帶酒館 id」——`settings.write` 沒有 `id` 時走
+  //    `requireActive()`，而設定頁永遠是「目前這一間」，那是刻意的。
+  assert.ok(
+    /rpc\('settings\.write',\s*\{\s*patch:\s*patch\s*\}/.test(source),
+    'settings.write 要送 { patch }（欄位名錯了宿主半會收到空的 patch）',
+  )
+
+  reactImpl.resetHooks()
+  exportsObject.__setZone('hall')
+  for (const key of ['taverns', 'activeId', 'characters', 'summary', 'settings']) {
+    delete exportsObject.__testSeed[key]
+  }
+  console.log('4l. persona UI OK — 三個欄位顯示得出值、名字與 persona 各自儲存、五個工具等級都在')
+}
+
+/* ------- ⚙️ 設定：生成參數（溫度／最多 token）＋ 範圍的鏡射（2.6.48）------- */
+
+{
+  /**
+   * ⚠️ 這一節有兩個目的，而且**第二個才是重點**：
+   *
+   * 1. 欄位畫得出來、按了送對東西（同 4l）。
+   * 2. **客戶端鏡射的那組範圍要等於 `lib/samplers.js` 的那一組。**
+   *    客戶端 bundle 沒有 ESM import，所以 `SAMPLER_RANGES` 是手抄的一份
+   *    （`plan.md` §7.9 的色票就是同一條規矩）。抄一份而沒有測試釘住的結果，
+   *    這個 repo 已經有前例：改色票時兩邊立刻走散，測試直接紅。
+   *
+   * 還有一條**否定的**斷言：畫面上不可以有 `top_p`。DSH 的 `LlmCallConfig`
+   * 沒有那個欄位，做一個存得起來、送不出去的欄位比沒有它更糟——那條理由寫在
+   * `lib/samplers.js` 的檔頭，而這裡是最容易被「順手補上」的地方。
+   */
+  const { TavernSettingsPage } = exportsObject.__components
+  const { __setRpc, __chat } = exportsObject
+
+  // ② 先驗鏡射：兩邊的常數必須一致。
+  const { TEMPERATURE_RANGE, MAX_TOKENS_RANGE } = await import('./lib/samplers.js')
+  const mirrored = exportsObject.__samplerRanges
+  assert.ok(mirrored !== undefined, '客戶端要匯出它鏡射的那組範圍（測試出口）')
+  assert.deepEqual(
+    mirrored.temperature,
+    { min: TEMPERATURE_RANGE.min, max: TEMPERATURE_RANGE.max },
+    '⚠️ 客戶端的溫度範圍要等於 lib/samplers.js 的（改一邊就會紅）',
+  )
+  assert.deepEqual(
+    mirrored.maxTokens,
+    { min: MAX_TOKENS_RANGE.min, max: MAX_TOKENS_RANGE.max },
+    '⚠️ 客戶端的 maxTokens 範圍要等於 lib/samplers.js 的',
+  )
+  assert.deepEqual(Object.keys(mirrored).sort(), ['maxTokens', 'temperature'], '只有這兩個')
+
+  const seen = []
+  __setRpc((op, args) => {
+    seen.push({ op, args })
+    if (op === 'settings.write') return Promise.resolve(Object.assign({}, args.patch))
+    if (op === 'room.write') return Promise.resolve(Object.assign({}, args.patch))
+    return Promise.resolve({})
+  })
+  Object.assign(exportsObject.__testSeed, {
+    loaded: true,
+    taverns: [{ id: 'tv-1', name: '測試酒館', active: true, exists: true, scaffolded: true, icon: '🍺' }],
+    activeId: 'tv-1',
+    characters: [],
+    summary: { name: 'tavern', counts: {}, files: [], layout: [] },
+    // `temperature` 是數字、`maxTokens` 是 `null`——兩種都要畫對。
+    settings: { name: '測試酒館', temperature: 0.8, maxTokens: null },
+  })
+
+  reactImpl.resetHooks()
+  exportsObject.__setZone('settings')
+  const tree = renderComponent(TavernSettingsPage, {})
+  const byLabel = (label) =>
+    collect(tree, (el) => el.props !== undefined && el.props['aria-label'] === label)[0]
+
+  // ① 兩個欄位都在，而且值顯示得出來。
+  const tempField = byLabel('溫度')
+  assert.ok(tempField !== undefined, '⚙️ 設定要有「溫度」這個欄位')
+  assert.equal(tempField.props.value, '0.8', 'temperature 要顯示成字串（輸入框的值是字串）')
+  const tokenField = byLabel('最多回幾個 token')
+  assert.ok(tokenField !== undefined, '⚙️ 設定要有「最多回幾個 token」')
+  assert.equal(tokenField.props.value, '', '⚠️ maxTokens 是 null ⇒ 空字串（不是 "null"、也不是 0）')
+
+  // HTML 的 min／max 屬性也要跟著鏡射的那組值（那是最直接的 UX 提示）。
+  assert.equal(String(tempField.props.min), String(mirrored.temperature.min), '輸入框的 min 要一致')
+  assert.equal(String(tempField.props.max), String(mirrored.temperature.max), '輸入框的 max 要一致')
+
+  // ③ 儲存：送出去的是**數字**，而且兩個一起送。
+  byLabel('溫度').props.onChange({ target: { value: '1.2' } })
+  const tree2 = renderComponent(TavernSettingsPage, {})
+  collect(tree2, (el) => el.props !== undefined && el.props['aria-label'] === '最多回幾個 token')[0].props.onChange(
+    { target: { value: '512' } },
+  )
+  const save = collect(
+    renderComponent(TavernSettingsPage, {}),
+    (el) => el.type === 'button' && el.props.children === '儲存生成參數',
+  )[0]
+  assert.ok(save !== undefined, '生成參數要有自己的儲存鈕')
+  save.props.onClick()
+  const call = seen.filter((one) => one.op === 'settings.write').pop()
+  assert.deepEqual(call.args.patch, { temperature: 1.2, maxTokens: 512 }, '兩個都要送，而且是數字')
+
+  // ④ 清空 ⇒ 送 `null`（＝沒有設定／聽上一層），**不是**送空字串、也不是送 0。
+  //    送 0 會變成「溫度 0」，那是一個完全不同的意思（最保守的取樣）。
+  reactImpl.resetHooks()
+  exportsObject.__setZone('settings')
+  const tree3 = renderComponent(TavernSettingsPage, {})
+  const field3 = (label) =>
+    collect(tree3, (el) => el.props !== undefined && el.props['aria-label'] === label)[0]
+  field3('溫度').props.onChange({ target: { value: '' } })
+  collect(renderComponent(TavernSettingsPage, {}), (el) => el.props !== undefined && el.props['aria-label'] === '最多回幾個 token')[0].props.onChange(
+    { target: { value: '' } },
+  )
+  collect(
+    renderComponent(TavernSettingsPage, {}),
+    (el) => el.type === 'button' && el.props.children === '儲存生成參數',
+  )[0].props.onClick()
+  assert.deepEqual(
+    seen.filter((one) => one.op === 'settings.write').pop().args.patch,
+    { temperature: null, maxTokens: null },
+    '清空要送 null（＝讓 DSH 決定），不是 0',
+  )
+
+  // ⑤ ⚠️ 宿主半說「這個值沒存下來」時，畫面上要說出來。
+  //    不回報就等於沒驗——使用者的體驗是「輸入了 5、按了儲存、看起來成功了，
+  //    但提示詞裡的溫度根本沒變」。
+  reactImpl.resetHooks()
+  exportsObject.__setZone('settings')
+  __setRpc((op, args) => {
+    if (op === 'settings.write') {
+      return Promise.resolve(Object.assign({}, args.patch, { dropped: ['temperature（要在 0 到 2 之間）'] }))
+    }
+    return Promise.resolve({})
+  })
+  collect(
+    renderComponent(TavernSettingsPage, {}),
+    (el) => el.type === 'button' && el.props.children === '儲存生成參數',
+  )[0].props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const shown = flatten(renderComponent(TavernSettingsPage, {}))
+  assert.ok(
+    shown.includes('沒有存下來') && shown.includes('temperature'),
+    '`dropped` 要顯示在畫面上（不然就是「看起來有設、其實沒設」）：' + shown,
+  )
+
+  // ⑥ 否定的斷言：客戶端**不可以做出 top_p 這個欄位**。
+  //    這一條放在客戶端是因為它最容易被順手補上——而 DSH 的
+  //    `LlmCallConfig`（provider／model／reasoningEffort／temperature／maxTokens／stop）
+  //    **沒有** top_p，補上去只會做出一個存得起來、送不出去的欄位。
+  //
+  //    ⚠️ 比對要**精準**，兩個坑都踩過了：
+  //      - `/top_?p/i` 會被 `stopPropagation` 命中（`s|topP`）→ 要加詞界。
+  //      - 用 `source` 會命中**我們自己寫的說明文字**（畫面上那句「DSH 的介面沒有
+  //        top_p，所以這一版也沒有」是**故意**寫給使用者看的）。所以用 `codeSource`
+  //        （剝掉註解），而且只找「欄位名」的形狀——`topP:`／`top_p:` 這種 key。
+  const identifier = '(?<![A-Za-z0-9_$])'
+  assert.equal(
+    new RegExp(identifier + 'top_?p\\s*:', 'i').test(codeSource),
+    false,
+    'DSH 沒有 top_p，客戶端不可以有這個欄位（存得起來、送不出去比沒有它更糟）',
+  )
+  assert.equal(
+    collect(tree, (el) => /top_?p/i.test(String(el.props['aria-label'] || ''))).length,
+    0,
+    '也不可以有一個 top_p 的輸入框',
+  )
+  // 而「送出去的欄位剛好是那兩個」這件事，上面的 ③／④ 已經用 deepEqual 釘死了
+  // （那比原始碼掃描強：它驗的是真的送出去的東西）。
+
+  reactImpl.resetHooks()
+  exportsObject.__setZone('hall')
+  void __chat
+  for (const key of ['taverns', 'activeId', 'characters', 'summary', 'settings']) {
+    delete exportsObject.__testSeed[key]
+  }
+  console.log('4m. 生成參數 UI OK — 兩個欄位、null ⇒ 空字串、清空送 null、dropped 會顯示、範圍與宿主一致')
+}
+
+/* --------- 輪次刻度：分輪規則，以及「刻度不可以跟著內容捲」（2.6.52）--------- */
+
+{
+  /**
+   * 使用者貼了 DSH 的 `.eGxaPq_marks`（右邊那條輪次刻度）說「還有這個工具」。
+   *
+   * 這一節只能釘**規則**（假的 React 沒有排版，量不到位置）。位置那一段是靠
+   * 真瀏覽器量的——而且**量了三次才對**，那三次都記在 `client.js` 的註解裡：
+   *   1. `position:absolute` 放進捲動容器 → **會跟著內容捲**，一往下捲就不見
+   *   2. 照 DSH 用 `position:sticky` 插槽 → **要排在最前面才成立**，排在最後面
+   *      等於只有捲到底才黏住
+   *   3. 外面包一層**不捲動的定位容器**（現在這個）→ 釘住，而且訊息區照樣捲
+   */
+  const anchors = exportsObject.__turnAnchors
+  assert.equal(typeof anchors, 'function', '要匯出分輪的純函式（測試出口）')
+
+  // 一輪＝一條使用者訊息 ＋ 它後面的角色回覆 → 輪的起點就是使用者訊息。
+  assert.deepEqual(
+    anchors([
+      { isUser: false, text: '開場白' },
+      { isUser: true, text: '嗨' },
+      { isUser: false, text: '你好' },
+      { isUser: true, text: '再一輪' },
+      { isUser: false, text: '好' },
+    ]),
+    [1, 3],
+    '輪的起點是使用者訊息；開場白不算一輪（它前面沒有問題可以跳）',
+  )
+  assert.deepEqual(anchors([]), [], '沒有訊息 → 沒有刻度')
+  assert.deepEqual(anchors([{ isUser: false, text: '只有開場白' }]), [], '只有開場白 → 一輪都沒有')
+  assert.deepEqual(anchors(null), [], 'null 不可以丟錯')
+  assert.deepEqual(anchors(undefined), [], 'undefined 不可以丟錯')
+  assert.deepEqual(
+    anchors([{ isUser: true }, null, { isUser: true }, 'x', { isUser: true }]),
+    [0, 2, 4],
+    '壞資料要跳過，不可以讓整條刻度消失',
+  )
+  // `isUser` 只認**嚴格 true**：`.jsonl` 是使用者可以手改的檔案。
+  assert.deepEqual(anchors([{ isUser: 1 }, { isUser: 'true' }, { isUser: true }]), [2], '只認嚴格 true')
+
+  // 原始碼那一半：刻度**不可以**住在捲動容器裡面（那是第一次量到的 bug）。
+  const railRule = /'\.dsh-tv-turnRail\{([^}]*)\}/.exec(source)
+  assert.ok(railRule !== null, '應該找得到 .dsh-tv-turnRail 的規則')
+  assert.ok(
+    /\.dsh-tv-logWrap\{[^}]*position:relative/.test(source),
+    '⚠️ 刻度要有**不捲動的定位祖先**（`.dsh-tv-logWrap`）——直接放進 ' +
+      '`.dsh-tv-chatLog`（overflow:auto）會跟著內容捲，一往下捲就消失',
+  )
+  // ⚠️ 這一條**不可以**寫成「整份原始碼都不准出現 sticky」：模型的選單分組標題
+  //    （`.dsh-tv-modelGroup`）本來就用 sticky，那是對的用法。要釘的是
+  //    「刻度**不要**靠 sticky 插槽」——所以比對那一條規則不存在，以及刻度自己
+  //    是 `position:absolute` ＋ `height:100%`（掛在不捲動的祖先上）。
+  assert.equal(
+    source.includes("'.dsh-tv-turnSlot{"),
+    false,
+    '⚠️ 不要用 sticky 插槽：它相對自然流位置，排在內容最後面只有捲到底才黏得住',
+  )
+  assert.ok(/position:absolute/.test(railRule[1]), '刻度要是絕對定位（疊在訊息區上）')
+  // ⚠️ 高度**不是** `height:100%`：框高要夾成 `min(條帶, 可用-64, 420)`（2.6.53 照原版），
+  //    所以由 `syncTurnRail()` 算出來、用 inline style 傳進去。
+  assert.ok(
+    /\{ className: 'dsh-tv-turnRail'[^}]*style: \{ height: String\(rail\.height\) \+ 'px' \}/.test(source),
+    '⚠️ 框高要由排版算式決定（`turnRailLayout()`），不是填滿整個高度',
+  )
+  // 刻度取代了原生捲軸 → 兩件事必須成對，不然使用者不知道自己在哪裡。
+  assert.ok(
+    /\.dsh-tv-chatLog\{[^}]*scrollbar-width:none/.test(source),
+    '⚠️ 藏了原生捲軸就要畫刻度（兩者成對，只做一半會讓使用者失去位置感）',
+  )
+  assert.ok(
+    /dsh-tv-chatLog::-webkit-scrollbar\{[^}]*display:none/.test(source),
+    'webkit 也要藏（Chrome／Edge 走這一條）',
+  )
+
+  console.log('4o. 輪次刻度 OK — 分輪只認嚴格 isUser、壞資料跳過、刻度有不捲動的定位祖先')
+}
+
+/* --------- 輪次刻度的排版：**固定間距**，不是按內容比例（2.6.53）--------- */
+
+{
+  /**
+   * 使用者看了第一版刻度說「間隔太遠了，你自己看看原版的邏輯」。
+   *
+   * 原版的邏輯（`dsh-client-ui-chat/lib/client.js`）是：
+   *   `itemPosition(index) = index * TURN_SPACING_PX`，`TURN_SPACING_PX = 10`
+   *   —— **固定 10px**，跟內容有多長無關。
+   *
+   * 我第一版做成「按內容比例縮放」（`offsetTop / scrollHeight * 可見高度`），
+   * 於是 6 輪散在 517px 上、每 87px 一個。這一節把原版的算式釘住。
+   */
+  const layout = exportsObject.__turnRailLayout
+  assert.equal(typeof layout, 'function', '要匯出刻度排版（測試出口）')
+
+  // ① 少於兩輪不畫。
+  assert.equal(layout(0, 500, 0), null, '0 輪不畫')
+  assert.equal(layout(1, 500, 0), null, '⚠️ 1 輪不畫（沒有「跳來跳去」可言）')
+
+  // ② 固定間距 10px、上下各留 6px。
+  const six = layout(6, 500, 0)
+  assert.deepEqual(
+    six.positions,
+    [6, 16, 26, 36, 46, 56],
+    '⚠️ 刻度是**固定 10px 間距**（原版 TURN_SPACING_PX），不是按內容比例散開',
+  )
+  assert.equal(six.height, 62, '條帶高度 = (6-1)*10 + 2*6 = 62')
+  assert.equal(six.offset, 0, '條帶比框小 → 不需要位移')
+
+  // ③ 對照第一版的壞行為：6 輪散在 517px 上（每 87px 一個）。這一條是**反例**，
+  //    寫出來是為了讓「為什麼」留在測試裡。
+  const stretched = 517 / (six.positions.length - 1)
+  assert.ok(stretched > 80, '第一版每 ' + Math.round(stretched) + 'px 一個（使用者嫌太遠）')
+  assert.equal(six.positions[1] - six.positions[0], 10, '原版是 10px')
+
+  // ④ 框高要夾住：不得超過 420px，也要比可用高度少 64px。
+  assert.equal(layout(100, 5000, 0).height, 420, '上限 420px（原版的 min(…,420px)）')
+  assert.equal(layout(100, 300, 0).height, 300 - 64, '可用高度小的時候要留 64px（原版的 -64px）')
+  assert.equal(layout(3, 1000, 0).height, 32, '條帶本身比框小的時候就用條帶的高度')
+
+  // ⑤ 輪數多的時候，當前那一輪要留在框裡（原版是用內層 scroller 置中）。
+  const many = layout(100, 300, 50)
+  const strip = (100 - 1) * 10 + 12
+  assert.ok(many.offset > 0, '輪數多、當前那一輪在中間 → 條帶要被推上去')
+  const activeTop = many.positions[50] - many.offset
+  assert.ok(
+    activeTop >= 0 && activeTop <= many.height,
+    '當前那一輪的刻度要在框內：top=' + activeTop + ' 框高=' + many.height,
+  )
+  assert.ok(many.offset <= strip - many.height, '位移不可以把條帶推超過尾端')
+
+  // ⑥ 當前那一輪在最上面 / 最下面時，位移要夾在兩端（不可以推出空白）。
+  assert.equal(layout(100, 300, 0).offset, 0, '第 1 輪 → 不位移')
+  assert.equal(layout(100, 300, 99).offset, strip - 236, '最後一輪 → 推到尾端為止')
+
+  // ⑦ 可用高度還沒量到（0／負數／NaN）時不可以爆掉。
+  for (const bad of [0, -5, undefined, null, Number.NaN]) {
+    const one = layout(6, bad, 0)
+    assert.ok(one !== null && Number.isFinite(one.height), 'bandHeight=' + String(bad) + ' 要能算出一組數字')
+  }
+
+  // ⑧ 原始碼那一半：CSS 不可以再出現「按比例」的痕跡，而且條帶要置中。
+  const railRule = /'\.dsh-tv-turnRail\{([^}]*)\}/.exec(source)
+  assert.ok(railRule !== null, '應該找得到 .dsh-tv-turnRail')
+  assert.ok(/top:50%/.test(railRule[1]), '⚠️ 條帶要在可用高度裡**垂直置中**（原版的 translateY(-50%)）')
+  assert.ok(/overflow:hidden/.test(railRule[1]), '條帶比框高的時候要夾住（多的靠 offset 滑動）')
+  assert.ok(
+    /\.dsh-tv-turnMark\{[^}]*transition:top/.test(source),
+    '刻度換位置要有過場（原版的 transition:top .22s）',
+  )
+
+  console.log('4p. 刻度排版 OK — 固定 10px 間距（不是按比例）、框高夾 420／留 64、當前那一輪留在框裡')
+}
+
+/* --------- 刻度的寬度：只有兩階，**這是照原版**（2.6.55）----------------- */
+
+{
+  /**
+   * 使用者：「還是覺得原版的比較好，你去看一看原版是怎樣做的」。
+   *
+   * 於是我**去量了真的 DSH 對話**（不是再讀 CSS）：13 輪、pitch 固定 10px、
+   * frame 高 132px，寬度是——
+   *
+   *   第 1–8 輪   8px  opacity .6   `markUnloaded`（內容還沒載進來）
+   *   第 9–12 輪  12px              `mark`
+   *   第 13 輪    20px              `markActive`
+   *
+   * 那個「三層」是 **狀態**（未載入／已載入／當前），不是「離選中多遠」。
+   * 我 2.6.54 自己加了一階「隔壁＝18px」——**原版沒有那一階**，已移除。
+   */
+  const base = /\.dsh-tv-turnMark::before\{([^}]*)\}/.exec(source)
+  assert.ok(base !== null, '應該找得到刻度的基礎樣式')
+  assert.ok(/width:12px/.test(base[1]), '一般刻度＝12px（原版的 `.mark`，量到的就是 12px）')
+  assert.ok(/background:var\(--dsh-tv-line\)/.test(base[1]), '一般用最弱的邊框色（原版是 rgba(0,0,0,.16)）')
+  const on = /\.dsh-tv-turnMarkOn::before\{([^}]*)\}/.exec(source)
+  assert.ok(on !== null, '應該找得到當前那一輪的樣式')
+  assert.ok(/width:20px/.test(on[1]), '當前＝20px（原版的 `.markActive`，量到的就是 20px）')
+  assert.ok(/background:var\(--dsh-tv-text-1\)/.test(on[1]), '當前用最亮的文字色')
+
+  // ⚠️ **反面**：那個我自己發明的「隔壁 18px」那一階必須**不存在**。
+  assert.equal(
+    source.includes('dsh-tv-turnMarkNear'),
+    false,
+    '⚠️ 「隔壁那一輪」那一階是 2.6.54 我自己加的，原版沒有——已經移除，不要加回來',
+  )
+  assert.equal(
+    /Math\.abs\(one\.ordinal - rail\.active\)/.test(source),
+    false,
+    '⚠️ 刻度寬度**不是**按「離當前多遠」決定的（原版是狀態）',
+  )
+  // 原版**有** 8px 那一階（未載入），但酒館沒有那個狀態——所以酒館不該憑空做它。
+  assert.equal(
+    /dsh-tv-turnMarkUnloaded/.test(source),
+    false,
+    '⚠️ 酒館沒有「未載入」狀態（整份 .jsonl 一次讀完），不要假造 8px 那一階',
+  )
+  // ⚠️ 這一條只是把「兩階」寫進測試：真的做出第三階之前，這一條會擋著。
+  assert.ok(
+    /只有兩階/.test(source),
+    '原始碼裡要留著「為什麼只有兩階」的說明（不然下一輪又會想加一階）',
+  )
+
+  console.log('4q. 刻度寬度 OK — 只有 12／20 兩階（照原版量到的）、沒有自創的隔壁那一階')
+}
+
+
+{
+  /**
+   * 使用者貼了 DSH composer 的 `.uV2eYG_tools`（`+指令`／`📎`／**訪問模式**）說
+   * 「這個區域還未做完」。做的是**酒館自己的工具權限**（不是 DSH 的訪問模式
+   * ——兩者是不同的軸，見 `client.js` 的 CSS 註解）。
+   *
+   * 這一節釘四件事：
+   *   1. **跨半契約**：選項的 `value` 要與 `workspace.js` 的 `ROOM_TOOL_LEVELS`
+   *      一字不差。少一個值就會出現「選了卻存不進去」——`writeRoom` 對不認得的
+   *      值**默默落回 `inherit`**，而畫面看起來像成功了。
+   *   2. chip 顯示得出房間目前的值（`inherit` → 「聽酒館的」）。
+   *   3. 選了就送 `room.write`，而且參數都對（尤其是**房間 id**）。
+   *   4. 寫入失敗要**退回原值**——不然畫面停在「看起來改好了」，磁碟上根本沒動。
+   */
+  const { __setRpc, __selectChat, __setChatTab } = exportsObject
+  const { TavernChatPage: ChatPage } = exportsObject.__components
+  const { ROOM_TOOL_LEVELS } = await import('./lib/workspace.js')
+
+  // ① 跨半契約（先把最容易走散的那一條釘死）。
+  const choices = exportsObject.__permissionChoices
+  assert.ok(Array.isArray(choices), '客戶端要匯出工具權限的選項（測試出口）')
+  assert.deepEqual(
+    choices.map((one) => one.value).sort(),
+    [...ROOM_TOOL_LEVELS].sort(),
+    '⚠️ chip 的選項要與 workspace.js 的 ROOM_TOOL_LEVELS 一字不差（少了就存不進去）',
+  )
+  for (const one of choices) {
+    assert.equal(typeof one.short, 'string', `${one.value} 要有短標籤（chip 只有 28px 高）`)
+    assert.ok(one.short.length > 0 && one.short.length <= 6, `${one.value} 的短標籤要夠短：${one.short}`)
+    assert.equal(typeof one.desc, 'string', `${one.value} 要有說明`)
+    // 文案的決定（plan.md §2.6.41）：講「它拿到什麼」，不是工具名稱。
+    assert.equal(
+      /read|glob|grep|write|edit|web_search/.test(one.desc),
+      false,
+      `⚠️ 說明不可以寫工具名稱（那是實作，不是使用者要決定的事）：${one.desc}`,
+    )
+  }
+
+  const seen = []
+  let failWrite = false
+  __setRpc((op, args) => {
+    seen.push({ op, args })
+    if (op === 'room.write') {
+      if (failWrite) return Promise.reject(new Error('寫不進去'))
+      return Promise.resolve({})
+    }
+    return Promise.resolve({})
+  })
+
+  const room = {
+    character: '老闆娘',
+    room: 'm1k3x9-a7f2',
+    name: '夜晚',
+    file: 'm1k3x9-a7f2/chat.jsonl',
+    allowTools: 'read',
+  }
+  const chip = (tree) => collect(tree, (el) => el.props.className === 'dsh-tv-permChip')[0]
+  const items = (tree) =>
+    collect(tree, (el) => String(el.props.className || '').includes('dsh-tv-permItem'))
+
+  __selectChat(room)
+  reactImpl.resetHooks()
+  __setChatTab('chat')
+
+  // ② chip 在 composer 上，顯示房間目前的值。
+  let tree = renderComponent(ChatPage, {})
+  assert.ok(chip(tree) !== undefined, 'composer 上要有工具權限那一顆 chip')
+  assert.equal(
+    chip(tree).props['aria-label'],
+    '工具權限，目前：只讀',
+    'aria-label 形狀照 DSH 那顆（「…，目前：X」）',
+  )
+  assert.equal(chip(tree).props['aria-expanded'], 'false', '沒開的時候 aria-expanded 是 false')
+  assert.ok(flatten(chip(tree)).includes('只讀'), 'chip 上要寫出目前那一級：' + flatten(chip(tree)))
+  // 它要在 📎 **右邊**（照 DSH 的 `[+指令][📎][modes]` 順序）。
+  const rowButtons = collect(
+    tree,
+    (el) => el.type === 'button' && /dsh-tv-(attachBtn|permChip)/.test(String(el.props.className)),
+  ).map((el) => el.props.className)
+  assert.deepEqual(
+    rowButtons,
+    ['dsh-tv-attachBtn', 'dsh-tv-permChip'],
+    '順序要照 DSH：附件鈕在前面、權限 chip 在後面',
+  )
+
+  // ③ 點開 → 六個選項，而且**目前那一級打勾**。
+  chip(tree).props.onClick()
+  tree = renderComponent(ChatPage, {})
+  const opts = items(tree)
+  assert.equal(opts.length, choices.length, '每一個等級都要有一列')
+  const checked = opts.filter((el) => el.props['aria-checked'] === 'true')
+  assert.equal(checked.length, 1, '只有一個是「目前」的')
+  assert.ok(flatten(checked[0]).includes('只讀'), '打勾的要是房間目前那一級')
+
+  // ④ 選另一個 → 送 room.write，而且只送 allowTools 那一格（不要把其他欄位蓋掉）。
+  const write = opts.filter((el) => flatten(el).includes('全關'))[0]
+  assert.ok(write !== undefined, '選項裡要有「全關」')
+
+  // ④a ⚠️ **點已經選中的那一個＝只關掉選單**（`plan.md` §2.6.43 為模型 chip 定下的
+  //     規矩；同一種控制項就該同一種行為）。不送請求，也不寫檔。
+  checked[0].props.onClick()
+  assert.equal(
+    seen.filter((one) => one.op === 'room.write').length,
+    0,
+    '⚠️ 點「目前這一級」不可以送 room.write（只關掉選單）',
+  )
+  assert.equal(
+    chip(renderComponent(ChatPage, {})).props['aria-expanded'],
+    'false',
+    '點目前那一級要收起選單',
+  )
+
+  // ④b 真的換一級 → 才送。
+  chip(renderComponent(ChatPage, {})).props.onClick()
+  const opts2 = items(renderComponent(ChatPage, {}))
+  opts2.filter((el) => flatten(el).includes('全關'))[0].props.onClick()
+  const call = seen.filter((one) => one.op === 'room.write').pop()
+  assert.ok(call !== undefined, '選了就要送 room.write（安全開關不該還要按儲存）')
+  assert.equal(call.args.character, '老闆娘', '要帶角色 id')
+  assert.equal(call.args.room, 'm1k3x9-a7f2', '⚠️ 要帶**房間 id**（不是顯示名稱）')
+  assert.deepEqual(call.args.patch, { allowTools: 'none' }, '只送 allowTools 那一格')
+
+  // ④c ⚠️ **改回去也要送**（這是在真瀏覽器上抓到的：比對的基準若用 `selected`
+  //     的舊快照，第二次點回原值會被當成「點已經選中的那一個」→ 不送請求 →
+  //     **改不回原本的值**，而畫面顯示的與磁碟上的從此不一致）。
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  // 選完之後選單是關的 → 要再點開才找得到選項。
+  chip(renderComponent(ChatPage, {})).props.onClick()
+  const back = items(renderComponent(ChatPage, {})).filter((el) =>
+    flatten(el).includes('聽酒館的'),
+  )[0]
+  assert.ok(back !== undefined, '選單裡要有「聽酒館的」')
+  back.props.onClick()
+  const revert = seen.filter((one) => one.op === 'room.write').pop()
+  assert.deepEqual(
+    revert.args.patch,
+    { allowTools: 'inherit' },
+    '⚠️ 改回原值也要送（不然「改了」就回不去了）',
+  )
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(
+    chip(renderComponent(ChatPage, {})).props['aria-expanded'],
+    'false',
+    '選完要收起選單',
+  )
+
+  // ⑤ `inherit` → chip 寫「聽酒館的」（不是空白的、也不是某一級）。
+  reactImpl.resetHooks()
+  __selectChat({ character: '老闆娘', room: 'm1k3x9-a7f2', name: '夜晚', allowTools: 'inherit' })
+  tree = renderComponent(ChatPage, {})
+  assert.ok(flatten(chip(tree)).includes('聽酒館的'), 'inherit 要寫「聽酒館的」：' + flatten(chip(tree)))
+  // 舊資料／缺欄位（`undefined`）也要落回 inherit，不可以是空白。
+  reactImpl.resetHooks()
+  __selectChat({ character: '老闆娘', room: 'm1k3x9-a7f2', name: '夜晚' })
+  tree = renderComponent(ChatPage, {})
+  assert.ok(
+    flatten(chip(tree)).includes('聽酒館的'),
+    'allowTools 缺欄位時要當成 inherit（不是空白 chip）',
+  )
+
+  // ⑥ 寫入失敗 → 退回原值 + 顯示錯誤（不是停在「看起來改好了」）。
+  reactImpl.resetHooks()
+  __selectChat(room)
+  tree = renderComponent(ChatPage, {})
+  chip(tree).props.onClick()
+  tree = renderComponent(ChatPage, {})
+  failWrite = true
+  items(tree).filter((el) => flatten(el).includes('全部'))[0].props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const after = renderComponent(ChatPage, {})
+  assert.ok(
+    flatten(chip(after)).includes('只讀'),
+    '⚠️ 寫不進去要退回原值（不然畫面停在一個磁碟上不存在的狀態）：' + flatten(chip(after)),
+  )
+  assert.ok(flatten(after).includes('寫不進去'), '錯誤要顯示出來：' + flatten(after).slice(0, 200))
+
+  __selectChat(null)
+  reactImpl.resetHooks()
+  __setChatTab('chat')
+
+  /**
+   * ⑦ ⚠️ **選單要往哪一邊長**（使用者回報：「選單框出界不在 windows 中」）。
+   *
+   * 這一條**只能在原始碼上釘**（離線的假 React 沒有排版），但它釘的是真的事實：
+   *
+   *   兩顆 chip 在 **相反的兩側**——模型 chip 在 composer 右邊、工具權限 chip 在左邊
+   *   （📎 右邊）。選單的 `left`／`right` 決定它往哪一邊長，所以兩者必須相反。
+   *
+   * 踩到的實況：工具權限那一顆照抄了模型那一顆的 `right:0` → 選單往**左**長出去，
+   * 越過主面板左界 133px，被 `.dsh-tv-mapBody` 的 `overflow:auto` **裁掉**
+   * （302px 的面板只看得到 169px，而且 `scrollWidth === clientWidth`＝連捲都捲不到）。
+   * ⚠️ 當時的驗證說「在視窗內＝true」——因為我拿**視窗**當邊界，但真正的邊界是
+   * **最近的捲動祖先**。這一條註解留著，免得下次又用視窗量。
+   */
+  const permRule = /'\.dsh-tv-usagePanel\.dsh-tv-permPanel\{([^}]*)\}/.exec(source)
+  assert.ok(permRule !== null, '應該找得到 .dsh-tv-permPanel 的定位規則')
+  assert.ok(/left:0/.test(permRule[1]), '⚠️ 工具權限選單要貼**左緣**（往右長），不可以 right:0')
+  assert.ok(/right:auto/.test(permRule[1]), '貼左緣就要把 right 設回 auto')
+  const modelRule = /'\.dsh-tv-usagePanel\.dsh-tv-modelPanel\{([^}]*)\}/.exec(source)
+  assert.ok(modelRule !== null, '應該找得到 .dsh-tv-modelPanel 的定位規則')
+  assert.ok(/right:0/.test(modelRule[1]), '模型 chip 在右邊 → 選單貼右緣（往左長）')
+  assert.notEqual(
+    permRule[1],
+    modelRule[1],
+    '⚠️ 兩顆 chip 在相反的兩側，定位規則**不可以合併成一條**（合併就會有一邊出界）',
+  )
+  // 往右長的選單還要有寬度上限，不然窄視窗會換成右邊出界。
+  assert.ok(/max-width:min\(/.test(permRule[1]), '要有 max-width 上限（窄視窗時不會從右邊出去）')
+
+  console.log('4n. 工具權限 chip OK — 六個值與宿主半一致、顯示目前那一級、選了就送、失敗會退回')
 }
 
 /* ---------- 🎭 卡司：海報牆（找卡）與編輯器（改卡）分開（redesign §3.2）---------- */
@@ -1327,9 +2038,9 @@ function spyRpc(seen, extra) {
   })
   spyRpc(seen, {
     'character.list': () => exportsObject.__testSeed.characters,
-    // 回音：`chat.create` 回傳的名字才是真正用的（撞名會換編號），
+    // 回音：`room.create` 回傳的 room id 才是真正用的（顯示名稱同名也可以），
     // 所以讓 mock 照著 args 回，才驗得到「append 用的是回傳值」。
-    'chat.create': (args) => ({
+    'room.create': (args) => ({
       character: args.character,
       room: 'r-' + args.name,
       name: args.name,
@@ -1399,14 +2110,14 @@ function spyRpc(seen, extra) {
   // 6. 建立 → 先開檔，再把開場白寫成第一則訊息。
   byLabel(form, '建立對話').props.onClick()
   await new Promise((resolve) => setTimeout(resolve, 0))
-  let create = seen.filter((one) => one.op === 'chat.create').pop()
-  assert.equal(create.args.id, 'tv-1', 'chat.create 一定要帶酒館 id（少了它會拿角色當酒館）')
+  let create = seen.filter((one) => one.op === 'room.create').pop()
+  assert.equal(create.args.id, 'tv-1', 'room.create 一定要帶酒館 id（少了它會拿角色當酒館）')
   assert.equal(create.args.character, '酒保')
   assert.equal(create.args.name, '酒保', '名稱要送出去')
-  let append = seen.filter((one) => one.op === 'chat.append').pop()
+  let append = seen.filter((one) => one.op === 'room.append').pop()
   assert.ok(append !== undefined, '選了開場白就要把它寫進檔案')
   assert.equal(append.args.character, '酒保', 'append 用的是 create 回傳的角色')
-  assert.equal(append.args.chat, 'r-酒保', 'append 用的是 create 回傳的**房間 id**，不是名字')
+  assert.equal(append.args.room, 'r-酒保', 'append 用的是 create 回傳的**房間 id**，不是名字')
   assert.equal(append.args.messages[0].text, '他擦著杯子。', '寫進去的要是選的那一則')
   assert.equal(append.args.messages[0].isUser, false, '開場白是角色的訊息，不是使用者的')
 
@@ -1429,15 +2140,15 @@ function spyRpc(seen, extra) {
   assert.equal(nameField(form).props.value, '第一次來', '使用者改過的名字不該被點卡蓋掉')
 
   // 8.「不要開場白」→ 檔案是空的，不該有 append。
-  const before = seen.filter((one) => one.op === 'chat.append').length
+  const before = seen.filter((one) => one.op === 'room.append').length
   byLabel(form, '不要開場白').props.onClick()
   form = renderRooms()
   byLabel(form, '建立對話').props.onClick()
   await new Promise((resolve) => setTimeout(resolve, 0))
-  create = seen.filter((one) => one.op === 'chat.create').pop()
+  create = seen.filter((one) => one.op === 'room.create').pop()
   assert.equal(create.args.name, '第一次來', '建立要用表單裡的名字')
   assert.equal(
-    seen.filter((one) => one.op === 'chat.append').length,
+    seen.filter((one) => one.op === 'room.append').length,
     before,
     '選了「不要開場白」就不該寫入任何訊息',
   )
@@ -1801,12 +2512,12 @@ function spyRpc(seen, extra) {
 
 {
   // 症狀：設定頁按「＋ 新對話」→ 選了角色 → 回「找不到這間酒館：老闆娘」。
-  // 原因：`chat.create` 需要 `{ id, character }`，只送 `character` 的話
-  // 宿主半會把它當成酒館 id。這一條把「所有 chat.create 都要帶 id」釘死。
-  const calls = [...source.matchAll(/rpc\(\s*'chat\.create'\s*,\s*\{([^}]*)\}/g)].map((m) => m[1])
-  assert.ok(calls.length >= 2, `應該找得到 chat.create 的呼叫點（找到 ${String(calls.length)} 個）`)
+  // 原因：`room.create` 需要 `{ id, character }`，只送 `character` 的話
+  // 宿主半會把它當成酒館 id。這一條把「所有 room.create 都要帶 id」釘死。
+  const calls = [...source.matchAll(/rpc\(\s*'room\.create'\s*,\s*\{([^}]*)\}/g)].map((m) => m[1])
+  assert.ok(calls.length >= 2, `應該找得到 room.create 的呼叫點（找到 ${String(calls.length)} 個）`)
   for (const args of calls) {
-    assert.match(args, /\bid\s*:/, `chat.create 一定要帶酒館 id，否則會拿角色當酒館：{${args.trim()}}`)
+    assert.match(args, /\bid\s*:/, `room.create 一定要帶酒館 id，否則會拿角色當酒館：{${args.trim()}}`)
   }
 
   // 設定頁要把目前酒館的 id 傳給對話分區，不然它無從得知。
@@ -1879,7 +2590,7 @@ function spyRpc(seen, extra) {
     delete exportsObject.__testSeed[key]
   }
 
-  console.log('4c. op 參數 OK — chat.create 與四個 character.* 都帶了酒館 id')
+  console.log('4c. op 參數 OK — room.create 與四個 character.* 都帶了酒館 id')
 }
 
 /* ---------- 內容變動後要重算上方統計（GUI 上看到數字不動）----------- */
@@ -2183,8 +2894,22 @@ function spyRpc(seen, extra) {
   fakeRpc.bindings = []
   __setRpc(fakeRpc)
 
-  // ── 沒有綁定 → 新開一個 ＋ 綁定 ──
-  const opened = await __chat.ensure('tavern-1', '老闆娘', '夜晚', 'C:\\tavern')
+  /* ── 沒有綁定 → 新開一個 ＋ 綁定 ─────────────────────────────────────────
+   *
+   * ⚠️ **這一節的參數形狀是 2.6.49 修過的**，它以前是
+   * `ensure(tavern, character, '夜晚', root)`——只傳一個字串，而那是**顯示名稱**。
+   * 真實世界就是這樣送出去的，於是每一筆綁定的 `room` 都是空的，agent 面只好拿
+   * 顯示名稱去當資料夾名 → `room.json` 永遠找不到 → **每房設定全部無聲失效**
+   * （工具權限、「這一場的指示」、生成參數）。離線測試完全看不出來，因為它
+   * 驗的是「有沒有送 session.bind」，不是「送出去的形狀對不對」。
+   *
+   * 所以這裡刻意讓**房間 id 與顯示名稱不一樣**（`m1k3x9-a7f2` vs `夜晚`）：
+   * 兩者相同就驗不出「有沒有送錯那一格」。
+   */
+  const ROOM = 'm1k3x9-a7f2'
+  const NAME = '夜晚'
+
+  const opened = await __chat.ensure('tavern-1', '老闆娘', ROOM, NAME, 'C:\\tavern')
   assert.equal(opened.created, true, '沒有綁定時要新開')
   assert.equal(opened.sessionId, 'session-new-0001')
   assert.equal(calls.created.length, 1, '要呼叫一次 session.create')
@@ -2192,26 +2917,59 @@ function spyRpc(seen, extra) {
   assert.equal(calls.created[0].agentPreset, 'dsh-tavern', '要指名酒館模式的 preset')
   assert.equal(calls.binds.length, 1, '要寫下對照表')
   assert.equal(calls.binds[0].character, '老闆娘')
-  assert.equal(calls.binds[0].chat, '夜晚')
+  assert.equal(
+    calls.binds[0].room,
+    ROOM,
+    '⚠️ `room` 要送**房間 id**——agent 面靠它讀 room.json（送了顯示名稱就永遠讀不到）',
+  )
+  assert.equal(calls.binds[0].chat, NAME, '`chat` 送**顯示名稱**（清單比對用），不是房間 id')
 
-  // ── 已經有綁定 → 回復，不要重開（重開會讓對話紀錄斷掉）──
-  fakeRpc.bindings = [{ sessionId: 'session-old-0002', character: '老闆娘', chat: '夜晚' }]
+  // ── 已經有**新形狀**的綁定 → 回復，而且不要重寫對照表 ──
+  fakeRpc.bindings = [{ sessionId: 'session-old-0002', character: '老闆娘', room: ROOM, chat: NAME }]
   calls.created.length = 0
   calls.binds.length = 0
-  const resumed = await __chat.ensure('tavern-1', '老闆娘', '夜晚', 'C:\\tavern')
+  const resumed = await __chat.ensure('tavern-1', '老闆娘', ROOM, NAME, 'C:\\tavern')
   assert.equal(resumed.created, false, '有綁定時要用回復的')
   assert.equal(resumed.sessionId, 'session-old-0002')
   assert.equal(calls.created[0].sessionId, 'session-old-0002', '要用 sessionId 回復')
   assert.equal(calls.created[0].agentPreset, undefined, '回復時不該再指名 preset')
-  assert.equal(calls.binds.length, 0, '回復不該重寫對照表')
+  assert.equal(calls.binds.length, 0, '形狀已經對了就不該重寫對照表')
 
-  // 綁定的是**別份**對話 → 不能誤用
-  fakeRpc.bindings = [{ sessionId: 'session-other', character: '酒保', chat: '打烊後' }]
+  // ── 舊形狀的綁定（只有 `chat`、放的是顯示名稱）→ 回復**並且就地補上 `room`** ──
+  //
+  // 這是**自我修復**：已經裝好的使用者手上全是這種綁定，不補的話他們的每房設定
+  // 會一直壞著，而我們又不能叫人去手改 `.sessions/*.json`。
+  fakeRpc.bindings = [{ sessionId: 'session-legacy-0003', character: '老闆娘', chat: NAME }]
   calls.created.length = 0
-  const other = await __chat.ensure('tavern-1', '老闆娘', '夜晚', 'C:\\tavern')
+  calls.binds.length = 0
+  const healed = await __chat.ensure('tavern-1', '老闆娘', ROOM, NAME, 'C:\\tavern')
+  assert.equal(healed.created, false, '舊形狀的綁定還是要回復（不要重開，會斷掉 session）')
+  assert.equal(healed.sessionId, 'session-legacy-0003')
+  // ⚠️ **這裡刻意不等 microtask／timer**：修補必須在 `ensure()` 回傳**之前**就送出去。
+  //    這一支在「送出訊息」那條路徑上被呼叫，而 `session.prompt` 就在後面——
+  //    射後不理的話，agent 面在**這一輪**讀到的還是舊綁定，症狀是
+  //    「修好了，但這一輪的每房設定沒生效、下一輪才好」（最難查的那一種：
+  //    「有時候靈、有時候不靈」）。這一條就是釘那個競態。
+  assert.equal(calls.binds.length, 1, '⚠️ 修補要在 ensure() 回傳之前就送出去（要 await 它）')
+  assert.equal(calls.binds[0].room, ROOM, '補的那一筆要帶房間 id')
+  assert.equal(calls.binds[0].chat, NAME, '顯示名稱要留著')
+  assert.equal(calls.binds[0].sessionId, 'session-legacy-0003', '不可以補到別的 session 上')
+
+  // ── 綁定的是**別份**對話 → 不能誤用 ──
+  fakeRpc.bindings = [{ sessionId: 'session-other', character: '酒保', room: 'zzz', chat: '打烊後' }]
+  calls.created.length = 0
+  const other = await __chat.ensure('tavern-1', '老闆娘', ROOM, NAME, 'C:\\tavern')
   assert.equal(other.created, true, '別份對話的綁定不可以拿來用')
 
-  console.log('8. session 控制器 OK — 惰性取得、新開、回復、不誤用別份對話的綁定')
+  // ── 同一間房、但顯示名稱改過 → 還是同一份對話（房間 id 才是身分）──
+  fakeRpc.bindings = [{ sessionId: 'session-renamed', character: '老闆娘', room: ROOM, chat: '白天' }]
+  calls.created.length = 0
+  calls.binds.length = 0
+  const afterRename = await __chat.ensure('tavern-1', '老闆娘', ROOM, NAME, 'C:\\tavern')
+  assert.equal(afterRename.created, false, '⚠️ 改過名字的房間不可以被當成新對話（那會開第二個 session）')
+  assert.equal(afterRename.sessionId, 'session-renamed')
+
+  console.log('8. session 控制器 OK — room（id）與 chat（名稱）分開送、舊綁定自我修復、改名不誤判')
 }
 
 /* ------------------------- 送訊息與逐字串流 ------------------------------- */
@@ -2595,7 +3353,7 @@ function spyRpc(seen, extra) {
     spyRpc([], {
       'character.list': () => [card],
       // `unused` 是宿主半沒收到名字時寫進 `.jsonl` 的佔位字串（SillyTavern 也這樣寫）。
-      'chat.messages': () => [
+      'room.messages': () => [
         { name: 'unused', isUser: true, text: '嗨' },
         { name: '老闆娘', isUser: false, text: '你終於來了。' },
       ],
@@ -3037,12 +3795,13 @@ function spyRpc(seen, extra) {
 
 {
   /**
-   * 症狀：`chat.delete` 這個 op 在 2.5.0 就做好了（宿主半有、`smoke.mjs` 第 14 項也驗過），
+   * 症狀：`room.delete`（2.6.46 前叫 `chat.delete`）這個 op 在 2.5.0 就做好了
+   * （宿主半有、`smoke.mjs` 第 14 項也驗過），
    * 但**畫面上沒有入口**——開了一份對話就永遠刪不掉，只能去檔案總管手動刪檔。
    * `docs/plan.md` §7.6 因此把它列為「UI 階段的第一件事」。
    *
    * 這一條釘住入口本身。最要緊的是**送出的參數**：這一頁踩過兩次同型的坑
-   * （`chat.create` 少了 `id` 會被當成角色 id、卡片編輯器四個動作全送錯），
+   * （`room.create` 少了 `id` 會被當成角色 id、卡片編輯器四個動作全送錯），
    * 而刪除送錯參數的後果只是「回一句找不到」，使用者會以為是刪不掉。
    *
    * 誠實說明這一條驗到哪裡：`state.chats` 在離線測試裡永遠是空的
@@ -3053,12 +3812,12 @@ function spyRpc(seen, extra) {
   const { TavernSettingsPage } = exportsObject.__components
   const { __setRpc } = exportsObject
 
-  const chatCall = /rpc\(\s*'chat\.delete'\s*,\s*\{([^}]*)\}/
+  const chatCall = /rpc\(\s*'room\.delete'\s*,\s*\{([^}]*)\}/
   const call = chatCall.exec(codeSource)
-  assert.ok(call !== null, '對話分區要有 chat.delete 的呼叫點')
-  assert.match(call[1], /\bid\s*:/, 'chat.delete 要帶酒館 id（少了會拿角色去找酒館）')
-  assert.match(call[1], /character\s*:/, 'chat.delete 要帶角色 id')
-  assert.match(call[1], /chat\s*:/, 'chat.delete 要帶對話名')
+  assert.ok(call !== null, '對話分區要有 room.delete 的呼叫點')
+  assert.match(call[1], /\bid\s*:/, 'room.delete 要帶酒館 id（少了會拿角色去找酒館）')
+  assert.match(call[1], /character\s*:/, 'room.delete 要帶角色 id')
+  assert.match(call[1], /room\s*:/, 'room.delete 要帶房間 id（不是顯示名稱）')
 
   const mapStart = codeSource.indexOf('function MapChatFiles(props)')
   const mapEnd = codeSource.indexOf('function MapOverview(props)')
@@ -3073,7 +3832,7 @@ function spyRpc(seen, extra) {
 
   // 列上的那一顆**不可以直接刪**：它只能把那一列標成待確認。
   assert.equal(
-    /chat\.delete|remove\(chat\)/.test(rowBody),
+    /room\.delete|remove\(chat\)/.test(rowBody),
     false,
     '列上的刪除鈕不可以直接刪——要先展開確認列',
   )
@@ -3104,11 +3863,11 @@ function spyRpc(seen, extra) {
     '💬 包廂是開新對話的地方',
   )
 
-  // 真的碰一次那顆按鈕：確認它接上了 onClick，而且**按一下不會送出 chat.delete**。
+  // 真的碰一次那顆按鈕：確認它接上了 onClick，而且**按一下不會送出 room.delete**。
   const sent = []
   __setRpc((op, args) => {
     sent.push({ op, args })
-    return Promise.resolve(op === 'chat.list' ? [] : {})
+    return Promise.resolve(op === 'room.list' ? [] : {})
   })
   const buttons = collect(
     renderComponent(TavernSettingsPage, {}),
@@ -3117,7 +3876,7 @@ function spyRpc(seen, extra) {
   // 清單是非同步載入的，而假 React 的 `useEffect` 不會跑，所以列在離線測試裡
   // 永遠是空的（`plan.md` §7.6）。這裡驗的是「空清單不會畫出刪除鈕、也不會送 op」。
   assert.equal(buttons.length, 0, '沒有對話時不該畫出刪除鈕')
-  assert.equal(sent.filter((one) => one.op === 'chat.delete').length, 0, '渲染不該送出 chat.delete')
+  assert.equal(sent.filter((one) => one.op === 'room.delete').length, 0, '渲染不該送出 room.delete')
 
   // 還原：後面的段落不該拿到這裡的種子與分區。
   reactImpl.resetHooks()
@@ -3125,7 +3884,7 @@ function spyRpc(seen, extra) {
   for (const key of ['taverns', 'activeId', 'characters', 'summary', 'settings']) {
     delete exportsObject.__testSeed[key]
   }
-  console.log('11. 刪除對話 OK — 二段確認、chat.delete 的三個參數、沒有對話框')
+  console.log('11. 刪除對話 OK — 二段確認、room.delete 的三個參數、沒有對話框')
 }
 
 /* --------- 房間裡也能改名（使用者：「改名應該房間內都可以改，不一定要在出面」）--------- */
@@ -3596,7 +4355,7 @@ function spyRpc(seen, extra) {
     { name: '老闆娘', isUser: false, text: '（舊的）', sendDate: '', reasoning: '' },
   ]
   __setRpc((op) => {
-    if (op === 'chat.messages') return Promise.resolve(messages)
+    if (op === 'room.messages') return Promise.resolve(messages)
     return Promise.resolve({})
   })
 
@@ -3859,7 +4618,7 @@ function spyRpc(seen, extra) {
     { name: '老闆娘', isUser: false, text: '收到了。', sendDate: '' },
   ]
   __setRpc((op) => {
-    if (op === 'chat.messages') return Promise.resolve(mediaRoom)
+    if (op === 'room.messages') return Promise.resolve(mediaRoom)
     return Promise.resolve({})
   })
   __selectChat({ character: '老闆娘', room: room, name: '夜晚', file: room + '/chat.jsonl' })

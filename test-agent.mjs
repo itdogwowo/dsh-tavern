@@ -15,7 +15,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-const { renderCard, readCard, apply, inject, AGENT_BUILD, __clearCache, resolveBinding, resolveCardFile } =
+const { renderCard, readCard, apply, inject, AGENT_BUILD, __clearCache, resolveBinding, resolveCardFile, TOOL_LEVELS } =
   await import('./lib/agent.js')
 
 /**
@@ -276,8 +276,17 @@ console.log('1. 匯出 OK — build =', AGENT_BUILD)
   assert.deepEqual(section.text.match(/\{\{[^{}]*\}\}/g), ['{{tavern_card}}'], 'section 只能有那一個參照')
 
   assert.equal(seen.suppressed, 1, '要關掉執行環境快照（沙箱／審批政策那些）')
-  assert.equal(seen.effects, 3, '三個註冊都要包在 ctx.effect 裡（fiber 卸載時自動回收）')
-  assert.deepEqual(seen.events, ['agent/pre-step'], 'R5：預設要掛世界書的 hook')
+  // 四個註冊：卡片變數、complete section、關掉 runtime context、生成參數。
+  // ⚠️ 這一條刻意**寫死數字**：加了新註冊卻忘記包 `ctx.effect()` 的話，
+  // fiber 卸載時那條 listener 會留下來（換一個 session 就多一份）。
+  assert.equal(seen.effects, 4, '四個註冊都要包在 ctx.effect 裡（fiber 卸載時自動回收）')
+  // `agent/request` 是生成參數（2.6.48），`agent/pre-step` 是世界書（R5）。
+  // **兩個都要有**：只留一個的話不是「生成參數沒生效」就是「世界書不注入了」。
+  assert.deepEqual(
+    seen.events,
+    ['agent/request', 'agent/pre-step'],
+    'R5 世界書的 hook ＋ 生成參數的 hook',
+  )
 
   // 卡片路徑讀不到時，變數 provider 要回空字串而不是丟錯。
   assert.equal(seen.variables[0].provider(), '', '路徑不存在時回空字串')
@@ -516,6 +525,413 @@ console.log('1. 匯出 OK — build =', AGENT_BUILD)
 
   rmSync(dir, { recursive: true, force: true })
   console.log('9. 世界書注入 OK — constant＋關鍵字命中、拒絕時不插手、沒有綁定就放行')
+}
+
+/* ------------- persona：{{user}}／「你是誰」／「這間店的規則」 ------------- */
+
+{
+  /**
+   * 這一節是**補上來的**（2.6.47）。
+   *
+   * persona 那一整條鏈（`tavern.json` 的 `userName`／`userPersona`／`tavernPrompt`
+   * → 系統提示 ＋ ⚙️ 設定那一區的輸入框）在 2.6.5 就做好了，但 `test-agent.mjs`
+   * 對它**一行斷言都沒有**——`plan.md` §8 甚至還寫著「persona：沒做」。
+   * 那是最危險的狀態：功能在、卻沒有人知道它還在不在（§2.6.44 的 `ensureTheme()`
+   * 就是同一型的：純函式全綠，只是沒有人呼叫）。
+   *
+   * 所以這裡從**真正的接線點**驗：抓 `ctx.systemPrompt.variable()` 註冊的那個解析器，
+   * 餵真的 `assembly` 進去，看它吐出來的**整份系統提示**。
+   */
+  __clearCache()
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-tavern-persona-'))
+  const root = join(dir, '酒館')
+  const SID = 'session-persona-0000-1111-2222-333344445555'
+  const ROOM = 'm1k3x9-a7f2'
+  const cardPath = join(root, 'characters', '老闆娘.json')
+
+  mkdirSync(join(root, 'characters'), { recursive: true })
+  mkdirSync(join(root, '.sessions'), { recursive: true })
+  mkdirSync(join(root, 'chats', '老闆娘', ROOM), { recursive: true })
+  writeFileSync(
+    cardPath,
+    JSON.stringify({
+      name: '老闆娘',
+      description: '{{char}} 是店主。{{user}} 是常客。',
+      first_mes: '{{user}}，你來了。',
+    }),
+  )
+  writeFileSync(
+    join(root, '.sessions', `${SID}.json`),
+    JSON.stringify({ sessionId: SID, character: '老闆娘', room: ROOM, chat: '夜晚' }),
+  )
+  const writeTavern = (patch) =>
+    writeFileSync(join(root, 'tavern.json'), JSON.stringify({ version: 1, ...patch }))
+  writeTavern({})
+
+  /** 抓 `systemPrompt.variable()` 的解析器——那才是真正的接線點。 */
+  let resolver = null
+  const ctx = {
+    effect: (fn) => fn(),
+    systemPrompt: {
+      variable: (name, fn) => {
+        resolver = fn
+        return () => {}
+      },
+      section: () => () => {},
+      suppressRuntimeContext: () => () => {},
+    },
+    inject: () => ({ then: () => {} }),
+    on: () => () => {},
+  }
+  const render = (config) => {
+    apply(ctx, config ?? { card: '', user: '' })
+    assert.equal(typeof resolver, 'function', 'apply 一定要註冊 systemPrompt.variable')
+    return resolver({ agent: { id: SID, session: { header: { cwd: root } } } })
+  }
+
+  // ① 基準：三個欄位都留空 → 提示詞**只有卡片**（與以前一字不差）。
+  const bare = render()
+  assert.ok(bare.includes('老闆娘 是店主。你 是常客。'), '卡片要先被渲染出來：' + bare)
+  assert.equal(bare.includes('# 關於'), false, '沒設 persona 就不該多出那一段')
+  assert.equal(bare.includes('# 這間店的規則'), false, '沒設店規就不該多出那一段')
+  assert.equal(bare.includes('# 這一場'), false, '沒設房間指示就不該多出那一段')
+
+  // ② `userName` → 卡片的 `{{user}}`。
+  writeTavern({ userName: '阿明' })
+  __clearCache()
+  const named = render()
+  assert.ok(named.includes('阿明 是常客。'), 'userName 要進到卡片的 {{user}}：' + named)
+  assert.equal(named.includes('{{user}}'), false, '認識的巨集不該原樣留著')
+
+  // ③ agent 面的 `settings.user` 蓋過 `tavern.json` 的 `userName`
+  //    （preset 的出貨值就住在那一格）。
+  const overridden = render({ card: '', user: '小美' })
+  assert.ok(overridden.includes('小美 是常客。'), 'settings.user 要蓋過 tavern.json：' + overridden)
+  assert.equal(overridden.includes('阿明'), false, '被蓋掉的那個不該還在')
+
+  // ④ persona ＋ 店規：**接在卡片後面**，不是取代它。
+  writeTavern({ userName: '阿明', userPersona: '老主顧，話不多。', tavernPrompt: '店裡不談政治。' })
+  __clearCache()
+  const full = render()
+  assert.ok(full.includes('阿明 是常客。'), '卡片還在（是附加，不是取代）')
+  assert.ok(full.indexOf('# 關於') > full.indexOf('# 人設'), 'persona 那一段要在卡片後面')
+  assert.ok(full.includes('老主顧，話不多。'), 'persona 的內文要進去')
+  assert.ok(full.includes('店裡不談政治。'), '店規的內文要進去')
+  assert.ok(full.indexOf('# 這間店的規則') > full.indexOf('# 關於'), '店規在 persona 之後')
+
+  // ⑤ ⚠️ 2.6.47 的修正：這兩段**也要換巨集**。
+  //    以前標題本身就是 `# 關於 {{user}}`，原樣送到模型——同一份提示詞裡
+  //    卡片被換、標題沒被換。使用者在 persona 裡寫 `{{char}}` 也一樣不會被換。
+  assert.equal(full.includes('{{user}}'), false, 'persona 那一段的 {{user}} 也要被換掉：' + full)
+  assert.ok(full.includes('# 關於 阿明'), '標題要換成真的名字')
+  writeTavern({
+    userName: '阿明',
+    userPersona: '{{user}} 是 {{char}} 的老朋友。',
+    tavernPrompt: '{{char}} 不接受殺價。',
+  })
+  __clearCache()
+  const macros = render()
+  assert.ok(macros.includes('阿明 是 老闆娘 的老朋友。'), 'persona 內文的巨集要被換：' + macros)
+  assert.ok(macros.includes('老闆娘 不接受殺價。'), '店規內文的巨集要被換：' + macros)
+  // 不認識的巨集照樣原樣留著（與卡片同一條規矩，不要默默吃掉）。
+  writeTavern({ userName: '阿明', userPersona: '今天是 {{random}}。' })
+  __clearCache()
+  assert.ok(
+    render().includes('今天是 {{random}}。'),
+    '不認識的巨集要原樣留著（與 renderCard 一致）',
+  )
+
+  // ⑥ 房間的「這一場」也一樣（同一個修正）。
+  writeFileSync(
+    join(root, 'chats', '老闆娘', ROOM, 'room.json'),
+    JSON.stringify({ version: 1, name: '夜晚', roomPrompt: '{{user}} 剛從雨裡走進來。' }),
+  )
+  writeTavern({ userName: '阿明' })
+  __clearCache()
+  const roomy = render()
+  assert.ok(roomy.includes('阿明 剛從雨裡走進來。'), '房間指示的巨集要被換：' + roomy)
+  assert.ok(roomy.indexOf('# 這一場') > roomy.indexOf('# 人設'), '房間指示也在卡片後面')
+
+  // ⑦ ⚠️ 快取鍵的修正：**改名字之後卡片要重畫**。
+  //    以前快取只比 mtime，所以在 ⚙️ 設定改名字之後，卡片還是舊的渲染結果
+  //    ——「改了名字，提示詞裡還是舊的」，而且只有動卡片檔才會好。
+  __clearCache()
+  const before = render({ card: '', user: '小美' })
+  assert.ok(before.includes('小美'), '第一次渲染要用小美')
+  const after = render({ card: '', user: '小華' })
+  assert.ok(after.includes('小華'), '換了名字就要重畫（mtime 沒變也一樣）：' + after)
+  assert.equal(after.includes('小美'), false, '舊名字不該留在快取裡')
+
+  // ⑧ 讀不到的東西一律不丟錯：tavern.json 壞掉、卡片檔消失。
+  writeFileSync(join(root, 'tavern.json'), '{ 這不是 JSON')
+  __clearCache()
+  const broken = render()
+  assert.ok(broken.includes('老闆娘 是店主。'), 'tavern.json 壞掉不該影響卡片')
+  assert.equal(broken.includes('# 關於'), false, '讀不到設定就當作沒設（不是炸掉）')
+  rmSync(cardPath, { force: true })
+  __clearCache()
+  const noCard = render()
+  assert.equal(typeof noCard, 'string', '卡片檔消失時還是要回一份提示詞（可能是空的）')
+  // ⚠️ 卡片沒了，但使用者寫的 persona 仍然要送出去——那是他自己打的字，
+  //    不該因為一張卡被搬走就靜靜消失。
+  writeTavern({ userPersona: '老主顧。' })
+  __clearCache()
+  assert.ok(render().includes('老主顧。'), '卡片檔消失時 persona 還是要送出去')
+
+  rmSync(dir, { recursive: true, force: true })
+  console.log('10. persona OK — userName／persona／店規／房間指示都進提示詞，巨集會換、留空不變')
+}
+
+/* ---------- 酒館層級的工具等級真的讀得到（`tavernField` 的死路）---------- */
+
+{
+  /**
+   * ⚠️ 這一節是為了 `dirname` 那個 bug 補的（2.6.47）。
+   *
+   * `tavernField()` 用 `dirname(cardFile)` 去算 `tavern.json` 的路徑，而
+   * `lib/agent.js` 的 import 只有 `join`——**`dirname` 從來沒有被 import 過**。
+   * 那支函式整包包在 `try/catch` 裡（刻意的：設定讀不到不該讓一輪對話失敗），
+   * 所以 `ReferenceError` 被靜靜吃掉，永遠回空字串。
+   *
+   * 後果是**整條 `tavern.json` 的讀取路徑都是死的**：
+   *   - `{{user}}` 永遠是預設的「你」（`userName` 沒人讀）
+   *   - persona 與店規**永遠不會**進提示詞
+   *   - `allowTools` 永遠讀成 `none`（fail closed，所以症狀是「設了全開，工具還是全關」）
+   *
+   * 為什麼拖了這麼久沒被發現：`node --check` 只看語法，而**純函式測試**只餵參數
+   * 進去、不會碰到讀檔那條路；`test-agent.mjs` 對 persona 一行斷言都沒有。
+   * 這一節把「讀得到」本身釘住——上面的第 10 節驗的是「讀到之後怎麼用」。
+   */
+  __clearCache()
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-tavern-level-'))
+  const root = join(dir, '酒館')
+  const SID = 'session-level-0000-1111-2222-333344445555'
+  mkdirSync(join(root, 'characters'), { recursive: true })
+  mkdirSync(join(root, '.sessions'), { recursive: true })
+  writeFileSync(join(root, 'characters', '酒保.json'), JSON.stringify({ name: '酒保' }))
+  writeFileSync(
+    join(root, '.sessions', `${SID}.json`),
+    JSON.stringify({ sessionId: SID, character: '酒保', chat: '夜晚' }),
+  )
+
+  const seen = { allow: [], deny: [], injected: false }
+  const scoped = {
+    effect: (fn) => fn(),
+    tools: {
+      schemas: () => [{ name: 'global_tool_a' }],
+      restrict(filter) {
+        if (Array.isArray(filter.allow)) seen.allow.push(filter.allow)
+        else seen.deny.push(filter.deny)
+        return () => {}
+      },
+    },
+  }
+  let resolver = null
+  const ctx = {
+    effect: (fn) => fn(),
+    systemPrompt: {
+      variable: (name, fn) => {
+        resolver = fn
+        return () => {}
+      },
+      section: () => () => {},
+      suppressRuntimeContext: () => () => {},
+    },
+    inject(deps, callback) {
+      seen.injected = true
+      callback(scoped)
+      return { then: () => {} }
+    },
+    on: () => () => {},
+  }
+
+  apply(ctx, { card: '', user: '' })
+  assert.equal(seen.injected, true, '要等 tools（工具遮罩靠它）')
+  // 還沒組裝之前是關著的（fail closed）——`deny` 的是繼承來的全域工具。
+  assert.equal(seen.deny.length, 1, '預設要先把繼承來的全域工具擋掉')
+  assert.deepEqual(seen.deny[0], ['global_tool_a'], '預設擋掉全域工具，不含保留的 run_code')
+
+  const assemble = () => resolver({ agent: { id: SID, session: { header: { cwd: root } } } })
+  const writeTavern = (value) =>
+    writeFileSync(join(root, 'tavern.json'), JSON.stringify({ version: 1, allowTools: value }))
+
+  // `read` → 白名單（**不是** deny）：`denyInheritedTools` 走的是另一條路。
+  writeTavern('read')
+  assemble()
+  assert.deepEqual(seen.allow.pop(), TOOL_LEVELS.read, '`read` 要套白名單，而且就是 TOOL_LEVELS 那一組')
+
+  writeTavern('write')
+  assemble()
+  assert.deepEqual(seen.allow.pop(), TOOL_LEVELS.write, '`write` 要套白名單')
+
+  writeTavern('web')
+  assemble()
+  assert.deepEqual(seen.allow.pop(), TOOL_LEVELS.web, '`web` 要套白名單')
+
+  // `all` → 完全不套限制。
+  const allowBefore = seen.allow.length
+  const denyBefore = seen.deny.length
+  writeTavern('all')
+  assemble()
+  assert.equal(seen.allow.length, allowBefore, '`all` 不該套白名單')
+  assert.equal(seen.deny.length, denyBefore, '`all` 不該 deny 任何東西')
+
+  // 手改檔案寫了不認識的值 → **回到 none（fail closed）**，不要默默放行。
+  writeTavern('全部都開')
+  assemble()
+  assert.deepEqual(seen.deny.pop(), ['global_tool_a'], '不明的值要 fail closed 成 none')
+
+  // 房間層級蓋過酒館（`inherit` 除外）——這是「有些設定適合精細化」的落地。
+  mkdirSync(join(root, 'chats', '酒保', 'r1'), { recursive: true })
+  writeFileSync(join(root, 'chats', '酒保', 'r1', 'room.json'), JSON.stringify({ version: 1, allowTools: 'read' }))
+  writeFileSync(
+    join(root, '.sessions', `${SID}.json`),
+    JSON.stringify({ sessionId: SID, character: '酒保', room: 'r1', chat: '夜晚' }),
+  )
+  writeTavern('all')
+  assemble()
+  assert.deepEqual(seen.allow.pop(), TOOL_LEVELS.read, '房間選 read 就要蓋過酒館的 all')
+
+  // `inherit`（房間的預設值）＝聽酒館的。
+  writeFileSync(
+    join(root, 'chats', '酒保', 'r1', 'room.json'),
+    JSON.stringify({ version: 1, allowTools: 'inherit' }),
+  )
+  const allowBeforeInherit = seen.allow.length
+  assemble()
+  assert.equal(seen.allow.length, allowBeforeInherit, 'inherit 要聽酒館的（酒館是 all＝不套限制）')
+
+  rmSync(dir, { recursive: true, force: true })
+  console.log('11. 工具等級 OK — tavern.json 真的讀得到、白名單正確、房間蓋過酒館、不明值 fail closed')
+}
+
+/* ------------- 生成參數：agent/request 這一條真的接上了（2.6.48）------------- */
+
+{
+  /**
+   * 這一節驗的是**接線**，不是規則（規則在 `test-samplers.mjs`）。
+   *
+   * 為什麼一定要有這一節：`resolveSamplers()` 全綠**不代表**參數真的會送到模型
+   * ——中間還隔著「有沒有掛 `agent/request`」、「`next()` 有沒有被呼叫」、
+   * 「回傳的物件有沒有被下游採用」。2.6.44 的 `ensureTheme()` 就是同一型的：
+   * 純函式測試全綠，只有「有沒有人呼叫」沒被釘住。
+   *
+   * `agent/request` 的形狀是照 `dsh-agent/lib/index.js` 的 `installModelSelection`
+   * 抄的：waterfall、`payload` 是 `{turn, step, signal}`、`next()` 回傳**已經解析好的
+   * `LlmCallConfig`**。
+   */
+  __clearCache()
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-tavern-sampling-'))
+  const root = join(dir, '酒館')
+  const SID = 'session-sampling-0000-1111-2222-333344445555'
+  const ROOM = 'r-sampling'
+
+  mkdirSync(join(root, 'characters'), { recursive: true })
+  mkdirSync(join(root, '.sessions'), { recursive: true })
+  mkdirSync(join(root, 'chats', '老闆娘', ROOM), { recursive: true })
+  writeFileSync(join(root, 'characters', '老闆娘.json'), JSON.stringify({ name: '老闆娘' }))
+  const writeBinding = (room) =>
+    writeFileSync(
+      join(root, '.sessions', `${SID}.json`),
+      JSON.stringify({ sessionId: SID, character: '老闆娘', room: room, chat: '夜晚' }),
+    )
+  writeBinding(ROOM)
+  const writeTavern = (patch) =>
+    writeFileSync(join(root, 'tavern.json'), JSON.stringify({ version: 1, ...patch }))
+  const writeRoom = (patch) =>
+    writeFileSync(join(root, 'chats', '老闆娘', ROOM, 'room.json'), JSON.stringify({ version: 1, ...patch }))
+  writeTavern({})
+  writeRoom({})
+
+  /** 收集 apply 掛了哪些事件（`agent/request` 是其中之一）。 */
+  const listeners = new Map()
+  const ctx = {
+    effect: (fn) => fn(),
+    systemPrompt: {
+      variable: () => () => {},
+      section: () => () => {},
+      suppressRuntimeContext: () => () => {},
+    },
+    inject: () => ({ then: () => {} }),
+    on(event, listener) {
+      listeners.set(event, listener)
+      return () => {}
+    },
+  }
+
+  apply(ctx, { card: '', user: '' })
+  assert.equal(listeners.has('agent/request'), true, '生成參數要掛 agent/request')
+  const request = listeners.get('agent/request')
+  const payload = { agent: { id: SID, session: { header: { cwd: root } } }, turn: 1, step: 1 }
+
+  /** DSH 那邊 `next()` 會回一份已經解析好的 config（照真實形狀寫）。 */
+  const DSH_CONFIG = { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'high' }
+  const run = async () => request(payload, () => Promise.resolve({ ...DSH_CONFIG }))
+
+  // ① 什麼都沒設 → **原樣回傳**（identity 一樣），不可以塞任何欄位。
+  const untouched = await run()
+  assert.deepEqual(untouched, DSH_CONFIG, '沒設定時不可以動任何欄位')
+  assert.equal(
+    'temperature' in untouched,
+    false,
+    '沒設定時**不可以**出現 temperature（那會改變既有對話的行為）',
+  )
+
+  // ② 酒館設了 → 蓋上去，而且**其他人的決定要留著**。
+  writeTavern({ temperature: 0.8, maxTokens: 512 })
+  const fromTavern = await run()
+  assert.equal(fromTavern.temperature, 0.8, '酒館的 temperature 要生效')
+  assert.equal(fromTavern.maxTokens, 512, '酒館的 maxTokens 要生效')
+  assert.deepEqual(
+    [fromTavern.provider, fromTavern.model, fromTavern.reasoningEffort],
+    [DSH_CONFIG.provider, DSH_CONFIG.model, DSH_CONFIG.reasoningEffort],
+    '⚠️ `next()` 的結果要留著——把 provider／model／reasoningEffort 吃掉的話，' +
+      '症狀是「選了模型卻沒生效」，而且看起來像 DSH 壞了',
+  )
+
+  // ③ 房間蓋過酒館（逐欄位）。
+  writeRoom({ temperature: 1.4 })
+  const fromRoom = await run()
+  assert.equal(fromRoom.temperature, 1.4, '房間的 temperature 要蓋過酒館')
+  assert.equal(fromRoom.maxTokens, 512, '房間沒設的那一欄要沿用酒館的')
+
+  // ④ 房間的 `null` ＝ 聽酒館的。
+  writeRoom({ temperature: null, maxTokens: null })
+  const inherited = await run()
+  assert.equal(inherited.temperature, 0.8, '房間的 null 要退回酒館')
+  assert.equal(inherited.maxTokens, 512, '同上')
+
+  // ⑤ 手改檔案寫了不合法的值 → 當作沒設，**不可以**送出去。
+  //    （`temperature: 99` 真的送給提供方會被拒絕，而且錯誤訊息很難懂。）
+  writeTavern({ temperature: 99 })
+  const invalid = await run()
+  assert.equal('temperature' in invalid, false, '不合法的值不可以送到請求裡')
+  assert.deepEqual(invalid, DSH_CONFIG, '不合法的值等於沒設（回到原樣）')
+
+  // ⑥ `temperature: 0` 是合法值，不可以被 falsy 判斷吃掉。
+  writeTavern({ temperature: 0 })
+  const zero = await run()
+  assert.equal(zero.temperature, 0, 'temperature 0 要送出去（0 不是「沒有」')
+
+  // ⑦ `next()` 一定要被呼叫，而且只呼叫一次（waterfall 的規矩）。
+  let nextCalls = 0
+  await request(payload, () => {
+    nextCalls += 1
+    return Promise.resolve({ ...DSH_CONFIG })
+  })
+  assert.equal(nextCalls, 1, '`next()` 要被呼叫，而且剛好一次')
+
+  // ⑧ 沒有綁定（不知道是哪間酒館）→ 原樣放行，不丟錯。
+  listeners.clear()
+  apply(ctx, { card: '', user: '' })
+  const unboundPayload = { agent: { id: 'session-unknown', session: { header: { cwd: root } } } }
+  const passthrough = await listeners.get('agent/request')(unboundPayload, () =>
+    Promise.resolve({ ...DSH_CONFIG }),
+  )
+  assert.deepEqual(passthrough, DSH_CONFIG, 'R11：沒有綁定時原樣放行')
+
+  rmSync(dir, { recursive: true, force: true })
+  console.log('12. 生成參數 OK — agent/request 接上了、房間蓋過酒館、留空原樣、不吃掉別人的決定')
 }
 
 console.log('\n全部通過 ✅')

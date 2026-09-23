@@ -358,6 +358,88 @@ try {
     console.log('9. 主圖 OK — 寫得進 tavern.json、清得掉、不存在的圖會被拒')
   }
 
+  /* --- 9b. 生成參數：寫得進去、驗得出來、壞值回報（2.6.48）---------------- */
+  {
+    // 這一條釘住的是**白名單**與**誠實回報**兩件事。
+    //
+    // ⚠️ 白名單：`writeSettings`／`writeRoom` 只搬它們認得的欄位，沒列到的會被
+    // **默默丟掉**（`assets` 就是這樣壞過一次，見第 9 節）。所以「欄位存得進去」
+    // 這件事一定要有測試——畫面看起來完全正常，只有磁碟上的檔案知道。
+    //
+    // ⚠️ 誠實回報：`allowTools` 打錯字落回 `none` 是 fail closed（安全的），
+    // 但 `temperature: 5` 落回「沒有設定」是**看起來有設、其實沒設**。
+    // 所以不合法的值要回報（`dropped`），不准靜靜吞掉。
+    const ws3 = new TavernWorkspace(root)
+
+    // ① 酒館層：合法值存得進去，而且磁碟上是真的。
+    const tavernSaved = await ws3.writeSettings({ temperature: 0.8, maxTokens: 512 })
+    assert.equal(tavernSaved.temperature, 0.8, 'temperature 要寫進 tavern.json')
+    assert.equal(tavernSaved.maxTokens, 512, 'maxTokens 要寫進 tavern.json')
+    assert.equal(tavernSaved.dropped, undefined, '全都合法時不該有 dropped')
+    const tavernOnDisk = JSON.parse(await readFile(join(root, 'tavern.json'), 'utf8'))
+    assert.equal(tavernOnDisk.temperature, 0.8, '要是磁碟上的事實')
+    assert.equal(tavernOnDisk.maxTokens, 512, '同上')
+
+    // ② 清除：送 `null` 回去，而且**不是刪掉欄位**（`readSettings` 的 fallback 有它）。
+    const cleared = await ws3.writeSettings({ temperature: null })
+    assert.equal(cleared.temperature, null, 'null ＝ 沒有設定')
+    assert.equal(cleared.maxTokens, 512, '只清 temperature，maxTokens 不可以被連帶清掉')
+    assert.equal((await ws3.readSettings()).temperature, null, '讀回來也要是 null')
+
+    // ③ 不合法 → **回報**，而且不寫進檔案。
+    //
+    // ⚠️ 這裡的行為是「**保留原本的值**」而不是「清成 null」：`writeSettings` 是
+    // 合併寫入（從 `readSettings()` 的結果開始），所以被丟掉的欄位維持原狀。
+    // 那個選擇是對的——打錯一個字不該把上一個好值也毀掉。
+    const bad = await ws3.writeSettings({ temperature: 5, maxTokens: 3.5 })
+    assert.equal(bad.temperature, null, '不合法的 temperature 不可以生效（不是夾到 2）')
+    assert.equal(bad.maxTokens, 512, '不合法的 maxTokens 要**保留原本的值**，不是清掉它')
+    assert.equal(Array.isArray(bad.dropped), true, '不合法時要回報 dropped')
+    assert.equal(bad.dropped.length, 2, '兩個都要回報：' + JSON.stringify(bad.dropped))
+    assert.ok(bad.dropped.some((one) => one.startsWith('temperature')), '要指出是哪一個欄位')
+    assert.ok(bad.dropped.some((one) => one.startsWith('maxTokens')), '同上')
+    const afterBad = JSON.parse(await readFile(join(root, 'tavern.json'), 'utf8'))
+    assert.equal(afterBad.temperature, null, '被丟掉的值不可以留在磁碟上')
+    assert.equal(afterBad.maxTokens, 512, '原本合法的值要活下來')
+
+    // ④ 房間層：同一組行為，而且 `null` ＝ 聽酒館的。
+    //
+    // ⚠️ 用 `createRoom()` 而不是直接 `writeRoom()`：`listRooms()` 把「沒有對話檔
+    // 又沒有名字」的資料夾當殘骸跳過（見它的註解），所以手動 `writeRoom` 建出來的
+    // 房間**不會出現在清單裡**——而下面 ⑤ 要驗的正是清單投影。
+    await ws3.writeSettings({ temperature: 0.8, maxTokens: 512 })
+    const made = await ws3.createRoom('甲', '生成參數房')
+    const roomId = made.room
+    const roomSaved = await ws3.writeRoom('甲', roomId, { temperature: 1.4 })
+    assert.equal(roomSaved.temperature, 1.4, '房間的 temperature 要存得進去')
+    assert.equal(roomSaved.maxTokens, null, '房間沒設的那一欄是 null（＝聽酒館的）')
+    const roomBad = await ws3.writeRoom('甲', roomId, { maxTokens: -1 })
+    assert.equal(roomBad.maxTokens, null, '房間層不合法的值也不可以生效')
+    assert.equal(roomBad.dropped.length, 1, '房間層也要回報')
+    assert.equal(roomBad.temperature, 1.4, '同一次寫入裡合法的那一欄要留著')
+
+    // ⑤ 清單的投影要帶得出這兩個欄位——「⚙️ 房間」那一格讀的是清單，
+    //    不是每一列都再打一次 `room.read`。漏掉投影的症狀是「存了但格子是空的」。
+    const listed = (await ws3.listRooms('甲')).find((one) => one.room === roomId)
+    assert.ok(listed !== undefined, '剛建的房間要在清單裡')
+    assert.equal('temperature' in listed, true, '清單要帶 temperature')
+    assert.equal('maxTokens' in listed, true, '清單要帶 maxTokens')
+    assert.equal(listed.temperature, 1.4, '值的來源是 room.json')
+    // 房間沒設 maxTokens ⇒ 清單回 `null`（＝聽酒館的），**不是**把酒館的 512 抄進來。
+    // ⚠️ 這一條很重要：抄進來的在畫面上看不出差別，但「這一間房到底有沒有自己的
+    //    設定」就永遠分不出來了——而使用者按「清除」時的行為取決於那件事。
+    assert.equal(listed.maxTokens, null, '房間層的 null 要原樣回傳，不要填成酒館的值')
+
+    // 還原：後面的段落不該拿到這裡的設定。
+    await ws3.writeSettings({ temperature: null, maxTokens: null })
+    assert.equal(
+      JSON.parse(await readFile(join(root, 'tavern.json'), 'utf8')).temperature,
+      null,
+      '收尾要把設定清乾淨',
+    )
+    console.log('9b. 生成參數 OK — 存得進 tavern.json／room.json、null ＝清除、壞值回報不寫入')
+  }
+
   /* --- 10. 無損往返：未知欄位一個都不能丟 --------------------------------- */
   {
     // 這一項取代了「匯入時留一份 .original」——見 docs/storage-layout.md §6。
