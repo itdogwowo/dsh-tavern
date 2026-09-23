@@ -718,8 +718,83 @@ console.log('1. 匯出 OK — build =', AGENT_BUILD)
   ).messages[0].content[0].text
   assert.equal(tailAfterClose.includes('【TAVERN-BOOK】'), false, '⚠️ 房間關掉的書也不該在訊息尾巴裡')
 
+  /* ---- ⑧ ⚠️ 房間調的**條目優先序**真的會改變注入順序（2.6.70）----------- */
+  //
+  // ⚠️ 這一條驗的是**接線**（最後一哩）：`lib/worldbook.js` 的排序規則在
+  // `test-worldbook.mjs` §4b 有測試，但那一條驗不到「`room.json` 的值有沒有真的
+  // 傳進 `collectLore`」——漏掉那一格的症狀是**安靜的**：畫面上一樣調得動，
+  // 注入的順序卻沒變，而使用者只會覺得「調了沒差」。
+  //
+  // ⚠️ **兩條路都要驗**（訊息尾巴 ＋ 系統提示）：只傳一邊的症狀是**同一輪裡
+  // 兩堆條目的順序不一樣**，而那是安靜的。
+  writeFileSync(join(root, 'tavern.json'), JSON.stringify({ version: 1, worldbookPosition: 'in-chat' }))
+  const writeOrdered = (name, position, order, content) =>
+    writeFileSync(
+      join(root, 'worldbooks', `${name}.json`),
+      JSON.stringify({
+        name,
+        position,
+        entries: { 0: { uid: 0, comment: name, content, constant: true, order } },
+      }),
+    )
+  // 甲：條目 order 900（照條目排一定在前面）／乙：order 1。
+  writeOrdered('甲書', 'in-chat', 900, '【甲】')
+  writeOrdered('乙書', 'in-chat', 1, '【乙】')
+  /** 把 `room.json` 寫成指定的覆寫，回傳這一輪要注入的尾巴文字。 */
+  const tailWith = async (patch) => {
+    writeFileSync(join(roomDir, 'room.json'), JSON.stringify({ version: 1, ...(patch ?? {}) }))
+    __clearCache()
+    return (await preStep({ agent, messages, turn: 1, step: 1 }, async () => ({ kind: 'enter', messages }))).messages[0]
+      .content[0].text
+  }
+  const plainTail = await tailWith(null)
+  assert.ok(
+    plainTail.includes('【甲】') && plainTail.includes('【乙】'),
+    '兩本書都要進尾巴（不然下面的順序斷言沒有意義）',
+  )
+  assert.ok(plainTail.indexOf('【甲】') < plainTail.indexOf('【乙】'), '都沒有覆寫 ⇒ 照書自己的 order（900 在 1 前面）')
+
+  // 房間把「乙」那一條（uid 0）拉到 950 ⇒ 它排到甲的前面。
+  const raisedTail = await tailWith({ worldbookEntryOverrides: { 乙書: { 0: { order: 950 } } } })
+  assert.ok(
+    raisedTail.indexOf('【乙】') < raisedTail.indexOf('【甲】'),
+    '⚠️ 房間把乙那一條調到 950 ⇒ 它排到甲的 900 前面（房間的覆寫真的傳進 collectLore）',
+  )
+  // 相反方向：把「甲」那一條壓到 0 ⇒ 乙在前面（壓低也生效）。
+  const loweredTail = await tailWith({ worldbookEntryOverrides: { 甲書: { 0: { order: 0 } } } })
+  assert.ok(loweredTail.indexOf('【乙】') < loweredTail.indexOf('【甲】'), '⚠️ 把甲壓到 0 ⇒ 乙在前面')
+
+  /**
+   * ⚠️ **系統提示那一條路也要吃同一份覆寫**。
+   *
+   * 把兩本都指到 `system-after`（進系統提示），再用房間的覆寫決定誰在前面：
+   * 那一堆的順序由 `collectLore` 決定，所以它必須也收到 `entryOverrides`。
+   */
+  writeOrdered('甲書', 'system-after', 900, '【甲】')
+  writeOrdered('乙書', 'system-after', 1, '【乙】')
+  const promptWith = (patch) => {
+    writeFileSync(join(roomDir, 'room.json'), JSON.stringify({ version: 1, ...(patch ?? {}) }))
+    __clearCache()
+    return cardResolver({ agent })
+  }
+  const promptPlain = promptWith(null)
+  assert.ok(
+    promptPlain.indexOf('【甲】') < promptPlain.indexOf('【乙】'),
+    '系統提示那一堆：沒覆寫 ⇒ 照書自己的 order（甲 900 在乙 1 前面）',
+  )
+  const promptRaised = promptWith({ worldbookEntryOverrides: { 乙書: { 0: { order: 950 } } } })
+  assert.ok(
+    promptRaised.indexOf('【乙】') < promptRaised.indexOf('【甲】'),
+    '⚠️ 房間的覆寫在**系統提示那一條路**也要生效（只傳一邊＝同一輪兩堆順序不一樣）',
+  )
+  // 而且尾端那一條路不會被它影響（兩本都搬到系統提示了 ⇒ 尾巴裡沒有它們）。
+  const tailAfterMove = await tailWith({ worldbookEntryOverrides: { 乙書: { 0: { order: 950 } } } })
+  assert.equal(tailAfterMove.includes('【甲】'), false, '搬到系統提示的書不該同時在尾巴（兩份）')
+
   rmSync(dir, { recursive: true, force: true })
-  console.log('10. 世界書位置 OK — system-* 進系統提示、in-chat 照舊、房間蓋過酒館、房間可逐書開關')
+  console.log(
+    '10. 世界書位置 OK — system-* 進系統提示、in-chat 照舊、房間蓋過酒館、房間可逐書開關、條目優先序真的改變注入順序',
+  )
 }
 
 /* ------------- persona：{{user}}／「你是誰」／「這間店的規則」 ------------- */

@@ -2070,80 +2070,86 @@ function spyRpc(seen, extra) {
     '⚠️ `in-chat` 不可以被當成「沒有設定」而不畫',
   )
 
+  /**
+   * ⑤ **條目 `order` 的上下限是宿主半的鏡射**（2.6.70）。
+   *
+   * ⚠️ 客戶端不能 import 宿主半（這一支是手寫的 bundle），所以 `ORDER_LIMITS`
+   * 有兩份——走散的話畫面會讓使用者輸入一個宿主半一定丟掉的值
+   * （症狀：打完、看起來存了、其實被丟掉）。
+   *
+   * ⚠️ **這一頁沒有「書層優先序」那一格了**（2.6.70 的第一版有，使用者打回來：
+   * 「你獨立給了我另一個次序了」）——所以這一節也不再驗 `bookPriorityValue`。
+   */
+  const { ORDER_LIMITS: HOST_ORDER } = await import('./lib/worldbook.js')
+  assert.deepEqual(exportsObject.__orderLimits, HOST_ORDER, '⚠️ 條目優先序的上下限要等於 lib/worldbook.js 的')
+  assert.equal(source.includes('__bookPriorityValue'), false, '書層優先序的測試出口不該還在（那一格已經拆掉）')
+
+  /**
+   * ⚠️ **`unknown op` 要翻譯成人話**（2.6.71，真的踩過）。
+   *
+   * `link:` 安裝時「前端重新整理就生效、宿主半要重啟 `dsh web`」，所以
+   * 「新前端 ＋ 舊宿主」是常態。而它的原始訊息是
+   * `讀不到內容：unknown op "worldbook.roomEntries"`——對使用者**沒有任何用處**。
+   */
+  const errText = exportsObject.__rpcErrorText
+  assert.equal(typeof errText, 'function', '要匯出 rpcErrorText（測試出口）')
+  const translated = errText('unknown op "worldbook.roomEntries"')
+  assert.match(translated, /unknown op/, '原始的錯誤字串要留著（不然查不動）')
+  assert.match(translated, /重啟/, '⚠️ 而且要說出**該做什麼**：重啟 dsh web')
+  assert.match(translated, /dsh web/, '要指名那個指令')
+  assert.equal(errText('找不到這間房：chats/甲/x'), '找不到這間房：chats/甲/x', '其他錯誤原樣傳出去（不要亂翻譯）')
+  assert.equal(errText(''), 'rpc failed', '空的錯誤也要有一句話')
+
   console.log('4u. 世界書位置 UI OK — 鏡射一致、酒館預設可選、原始值、清單上看得到位置')
 }
 
-/* --------- 房間的「📖 藏書」：書名本身就是「去改它」（2.6.66）--------- */
+/* --------- 房間的「📖 藏書」：開關、位置、以及展開後的條目優先序 --------- */
 
 {
   /**
-   * 使用者回報的兩件事，其實是同一段程式的兩個毛病：
+   * 使用者把這一頁砍到只剩兩件事：
    *
-   *   > 去改內容失效沒有跳過去
-   *   > 看內容其實你的設計方法是將他接的起來了，所以按鈕可能要再設計一下
+   *   > 房間中原本也不預期改動，我實際上只需要管理啟動與否和位置就可以了，
+   *   > 所有藏書都會同一在酒館中修改設定。
    *
-   * ① **跳不過去**的成因是「只換了分區、沒有換主面板」：房間那一頁是另一張面板
-   *    （`tavern-chats`），而 📖 藏書 住在酒館設定那一張（`tavern`）。少了
-   *    `selectPanel` 那一下，畫面完全不動——看起來就像按鈕壞了。
+   * 所以 2.6.68 把 2.6.65/2.6.66 加上去的東西收回來了：**內容預覽**、
+   * **書名＝跳去酒館改**，連同它們的管線（`jumpToBook`／一格交接／一條通道）
+   * 一起拿掉——留著沒人用的死碼比沒有更糟。
    *
-   * ② **按鈕分不出來**的成因是「兩顆做同一件事的按鈕」：「看內容」當場把內文攤開，
-   *    而旁邊那顆「去改它」只是換一頁。現在**一個動作一個入口**：
-   *      書名   ＝ 去別的地方改（換分區 ＋ 換面板 ＋ 打開那一本）
-   *      「內容」＝ 就地展開（唯讀）
+   * ⚠️ 2.6.70 使用者補上第三件（**優先序**）：
    *
-   * ⚠️ 這一節驗的是**行為**，不是掃原始碼：跳轉走模組層級的狀態（`__jumpToBook`），
-   *    清單則靠 `__loadRoomBooks()` 驅動（載入住在 effect，假 React 不跑它）。
+   *   > 酒館有個圖書館，開房間的時候會將所有預設放進去，然後房間自己可以微調修改，
+   *   > 不包括內容，只是修改位置以及優先序
+   *
+   * ⚠️ 而它的**第一版做錯了**：我做的是「書層」的優先序（一本書一個數字），
+   * 使用者打回來：
+   *
+   *   > 我看見**世界書裏面有不同的項目設定次序**，我說的是那個，
+   *   > 你獨立給了我另一個次序了
+   *
+   * 所以第三件事是**展開「▸ 條目」之後，每一條條目自己的優先序**（ST 的
+   * `order`）——值存在 `room.json`，**書的檔案一個字都不會被改**。
+   *
+   * ⚠️ 這一節是一條**圍籬**：房間那一頁只准有「用不用它」、「放在哪」與
+   *    「條目的優先序」，而且**不准改書的內容**。以後想再加東西到這一頁，
+   *    先看這一條為什麼紅。
+   *
+   * ⚠️ 驗的是**行為**：清單載入住在 effect，而假 React 不跑 effect
+   *    ——所以要靠 `__loadRoomBooks()` 驅動。
    */
   const { RoomBooksPane } = exportsObject.__components
-  const {
-    __setRpc,
-    __jumpToBook,
-    __pendingBookOpen,
-    __takePendingBookOpen,
-    __bookOpenChannel,
-    __setZone,
-    __currentZone,
-    __shownPanel,
-  } = exportsObject
+  const { __setRpc, __loadRoomBooks } = exportsObject
 
-  const panels = []
-  exportsObject.__chat.setContext({
-    get: (key) => (key === 'layout' ? { selectPanel: (name) => panels.push(name) } : undefined),
-  })
-  __setZone('hall')
-
-  // ① 跳轉要做完三件事（少一件就是「按了沒反應」）。
-  __jumpToBook('輸出格式')
-  assert.equal(__currentZone(), 'books', '要換到「📖 藏書」那一區')
-  assert.deepEqual(panels, ['tavern'], '⚠️ 而且要把主面板真的指過去——房間那一頁是另一張面板')
-  assert.equal(__shownPanel(), 'tavern', '要記住「現在停在這一頁」，不然那顆 ＋ 的來回判斷會跟著錯')
-  assert.equal(__pendingBookOpen(), '輸出格式', '要打開哪一本要交接出去')
-
-  // 交接格**撿走就清掉**：忘了清 ＝ 下一次重畫又跳一次。
-  assert.equal(__takePendingBookOpen(), '輸出格式', '交接值要撿得到')
-  assert.equal(__pendingBookOpen(), '', '撿走之後一定要清掉')
-  assert.equal(__takePendingBookOpen(), '', '沒有東西時回空字串（呼叫端不必分辨）')
-
-  /**
-   * ⚠️ **人已經停在 📖 藏書 的時候，`MapWorldbooks` 不會重新掛載**
-   * （它只在 `currentZone === 'books'` 時掛著）——所以掛載 effect 那一下跑不到，
-   * 必須再有一條通道通知它。少了這一條，症狀是「第二本書點了沒反應」。
-   */
-  const notified = []
-  const stopWatch = __bookOpenChannel.watch(() => notified.push('open'))
-  __jumpToBook('酒館')
-  stopWatch()
-  assert.equal(notified.length, 1, 'MapWorldbooks 要聽得到「打開某一本」')
-  assert.equal(__pendingBookOpen(), '酒館', '交接值要留給它撿')
-  __takePendingBookOpen()
-  assert.match(
-    source,
-    /bookOpenChannel\.watch\(function \(\) \{\n\s*var next = takePendingBookOpen\(\)/,
-    '⚠️ 掛載時撿一次、收到通知再撿一次（只靠掛載 effect 會漏掉「已經在這一頁」那一次）',
-  )
-
-  // ② 那一列：書名是「去改它」，而且位置顯示的是**這一間房**的覆寫值。
   const calls = []
+  /**
+   * ⚠️ **這一支假 rpc 有狀態**（`entryOverrides` 會被 `room.write` 更新）。
+   *
+   * 為什麼要這樣：房間那一頁每次寫完都會 `load()` 重讀，而「只動那一條、
+   * 其他條目原樣帶著」這個規矩**只有在前一次寫入真的留著時才驗得出來**。
+   * 無狀態的假 rpc 會讓每一次寫入都從同一份初始值出發——那樣「漏帶別的條目」
+   * 這個 bug 永遠不會紅。
+   */
+  let entryOverrides = { 酒館: { 0: { order: 950 } } }
   const fakeRpc = (op, args) => {
     calls.push({ op, args })
     if (op === 'worldbook.roomPositions') {
@@ -2151,16 +2157,37 @@ function spyRpc(seen, extra) {
         room: '',
         tavern: 'system-before',
         books: [
-          { id: '酒館', position: 'in-chat', explicit: false, overridden: true },
-          { id: '輸出格式', position: 'system-after', explicit: true, overridden: true },
-          { id: '世界觀', position: 'in-chat', explicit: false, overridden: false },
+          { id: '酒館', position: 'in-chat', ownPosition: '', explicit: false, overridden: true },
+          { id: '輸出格式', position: 'in-chat', ownPosition: 'system-after', explicit: true, overridden: true },
+          { id: '世界觀', position: 'in-chat', ownPosition: '', explicit: false, overridden: false },
         ],
-        // 兩本都有覆寫：第二本同時「書自己指定」——**書自己的要贏**。
+        // 兩本有覆寫：第二本同時「書自己指定位置」——**房間指定的要贏**（2.6.69）。
         overrides: { 酒館: { position: 'in-chat' }, 輸出格式: { position: 'in-chat' } },
+        entryOverrides: entryOverrides,
       })
     }
-    if (op === 'worldbook.read') {
-      return Promise.resolve({ id: args.book, entries: { 0: { comment: '第一條', content: '內文' } } })
+    if (op === 'room.write') {
+      if (args !== undefined && args.patch !== undefined && args.patch.worldbookEntryOverrides !== undefined) {
+        entryOverrides = args.patch.worldbookEntryOverrides
+      }
+      return Promise.resolve(args === undefined ? {} : args.patch)
+    }
+    // ⚠️ 展開走的是 `worldbook.roomEntries`（**鍵與算完的 order 由宿主半給**），
+    //    不是 `worldbook.read`——客戶端自己推鍵就會走散。
+    if (op === 'worldbook.roomEntries') {
+      const mine = entryOverrides[args.book] ?? {}
+      return Promise.resolve({
+        book: args.book,
+        position: 'in-chat',
+        entries: [
+          { key: '0', label: '第一條', content: '內文一', constant: true, disabled: false, ownOrder: 100 },
+          { key: '1', label: '第二條', content: '內文二', constant: false, disabled: false, ownOrder: 200 },
+        ].map((one) => {
+          const value = mine[one.key]
+          const has = value !== null && value !== undefined && typeof value.order === 'number'
+          return { ...one, order: has ? value.order : one.ownOrder, overridden: has }
+        }),
+      })
     }
     return Promise.resolve({})
   }
@@ -2171,55 +2198,249 @@ function spyRpc(seen, extra) {
   await exportsObject.__loadRoomBooks()
   const tree = renderComponent(RoomBooksPane, props)
 
-  const names = collect(tree, (el) => el.type === 'button' && el.props.className === 'dsh-tv-bookLink')
-  assert.equal(names.length, 3, '書名本身要是一顆按鈕（＝「去改它」的入口）')
-  assert.equal(String(names[0].props.children), '酒館', '書名就是那一本的名字')
-  assert.match(String(names[0].props.title), /📖 藏書/, '要說明白按下去會去哪裡')
+  // ① 這一頁的按鈕**只有**「▸ 條目」（展開）與說明那顆 `?`——沒有跳轉、沒有第二顆。
+  assert.deepEqual(
+    collect(tree, (el) => el.type === 'button').map((one) => String(one.props.className)),
+    ['dsh-tv-help', 'dsh-tv-btn', 'dsh-tv-btn', 'dsh-tv-btn'],
+    '⚠️ 一本一顆「▸ 條目」，加上房間預設那一格的說明 `?`——沒有其他動作按鈕',
+  )
+  assert.deepEqual(
+    collect(tree, (el) => el.props.className === 'dsh-tv-btn').map((one) => String(one.props.children)),
+    ['▸ 條目', '▸ 條目', '▸ 條目'],
+    '平時是收起來的（`▸`）',
+  )
+  assert.equal(source.includes("'去改它'"), false, '「去改它」連同它那條管線一起拿掉了')
+  assert.equal(source.includes('jumpToBook'), false, '跳轉那條管線不該還留著（死碼）')
+  // ⚠️ 那一列上**沒有**優先序那一格了（書層的順序是 2.6.70 第一版的錯誤）。
+  assert.equal(
+    collect(tree, (el) => String(el.props['aria-label'] ?? '').endsWith(' 的優先序')).length,
+    0,
+    '⚠️ 書層的優先序那一格不該還在（使用者要的是條目層的）',
+  )
 
-  // 按下去要真的跳（走的是同一支 `jumpToBook`）。
-  panels.length = 0
-  __setZone('hall')
-  names[1].props.onClick()
-  assert.equal(__currentZone(), 'books', '點書名要跳到 📖 藏書')
-  assert.deepEqual(panels, ['tavern'], '而且要換主面板')
-  assert.equal(__pendingBookOpen(), '輸出格式', '要交接「打開這一本」')
-  __takePendingBookOpen()
+  // ② 書名只是文字。
+  const names = collect(tree, (el) => el.props.className === 'dsh-tv-bookName')
+  assert.deepEqual(
+    names.map((one) => String(one.props.children)),
+    ['酒館', '輸出格式', '世界觀'],
+    '一本列一個書名（純文字）',
+  )
 
-  // 「內容」是那一列唯一的另一顆按鈕（不再有第二顆做同一件事的）。
-  const peeks = collect(tree, (el) => el.type === 'button' && el.props.className === 'dsh-tv-btn')
-  assert.equal(peeks.length, 3, '一列一顆「內容」——舊的兩顆按鈕已經合成一個動作一個入口')
-  assert.equal(peeks[0].props['aria-expanded'], 'false', '平時是收起來的（跟說明那顆 `?` 同一套規矩）')
-  assert.match(String(peeks[0].props.children), /內容/)
-  assert.equal(source.includes("'去改它'"), false, '「去改它」不該再是一顆獨立按鈕（書名就是入口）')
+  // ③ 開關：每一本都有，而且預設是開的；關掉要送 `worldbookOverrides`（只動那一本）。
+  const toggles = collect(tree, (el) => el.props['aria-label'] === '用這本書')
+  assert.equal(toggles.length, 3, '一本一個「用這本書」')
+  assert.deepEqual(
+    toggles.map((one) => one.props.checked),
+    [true, true, true],
+    '沒有覆寫 ⇒ 預設是開的',
+  )
+  calls.length = 0
+  toggles[0].props.onChange({ target: { checked: false } })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const off = calls.filter((one) => one.op === 'room.write')[0]
+  assert.ok(off !== undefined, '關掉一本要送 room.write')
+  /**
+   * ⚠️ **開關不可以把同一本書的其他設定清掉**（2.6.70 修的）。
+   *
+   * 舊版是 `next[bookId] = patch`（整格取代），所以關掉一本書會**當場把它的
+   * 位置清掉**，而畫面上什麼都不會說；關掉再打開就再也回不去。
+   * 現在是**合併**：`null` 的值才是「刪掉那個鍵」。
+   */
+  assert.deepEqual(
+    off.args.patch.worldbookOverrides.酒館,
+    { position: 'in-chat', enabled: false },
+    '⚠️ 關掉 ＝ 寫 `enabled:false`，而且位置要原樣帶著（合併，不是整格取代）',
+  )
+  assert.deepEqual(off.args.patch.worldbookOverrides.輸出格式, { position: 'in-chat' }, '別的書的覆寫不能被清掉')
+  // ⚠️ 而它**不可以**順手動到條目那一包（兩者是不同的鍵）。
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(off.args.patch, 'worldbookEntryOverrides'),
+    false,
+    '⚠️ 關一本書不該送出條目覆寫（沒送＝不動，送了就有可能清掉別的）',
+  )
 
-  // 位置那一格：這一間房的覆寫 → 書自己指定的（**書贏**）→ 都沒有＝聽這一間房的。
+  // ④ 位置那一格：顯示的是**這一間房指定的值**（空＝不在這裡指定）。
   const posSelects = collect(tree, (el) => el.props.className === 'dsh-tv-in dsh-tv-inInline')
   assert.equal(posSelects.length, 3, '一本一顆位置選單（擠在同一列，所以不能用 MapSelect 那一整格）')
   assert.deepEqual(
     posSelects.map((one) => String(one.props.value)),
-    ['in-chat', 'system-after', ''],
-    '⚠️ 覆寫優先、但書自己指定的那一本要贏過覆寫；都沒有才是空字串（＝聽這一間房的預設）',
+    ['in-chat', 'in-chat', ''],
+    '⚠️ 顯示的是房間的覆寫，不是算完的結果——第三本沒覆寫所以是空的',
   )
   assert.deepEqual(
     posSelects[0].props.children.map((o) => String(o.props.value)),
     ['', 'system-before', 'system-after', 'in-chat'],
-    '第一個選項是空字串（＝聽這一間房的預設）',
+    '第一個選項是空字串（＝不在這一間房指定它）',
   )
-
-  // 「內容」按下去：讀那一本，而且**每按一次都重讀**（書的內容可能剛被改過）。
+  /**
+   * ⑤ ⚠️ **每一本都改得動**（2.6.69）。
+   *
+   * 2.6.67–2.6.68 這裡鎖住「書自己指定」的那一本：那時候的優先序是「書 → 房間」，
+   * 所以房間怎麼選都不會生效。使用者要的是「房間可以設定位置」，順位改成
+   * 「**房間指定的 → 書自己 → 房間預設 → 酒館預設**」之後，鎖就沒有理由了。
+   */
+  assert.deepEqual(
+    posSelects.map((one) => one.props.disabled === true),
+    [false, false, false],
+    '⚠️ 每一本都改得動——沒有「能改卻改不動」的格子',
+  )
+  assert.equal(source.includes('positionOverride') === false, true, '客戶端不該自己算優先序（那是宿主半的事）')
+  /**
+   * ⑥ 空格子的標籤要**老實**：不指定時，書自己指定過的那一本會用它自己的值
+   *    ——所以那一本的標籤寫「書自己的（系統提示・後）」，不是「聽這一間房的」。
+   */
+  assert.deepEqual(
+    posSelects.map((one) => String(one.props.children[0].props.children)),
+    ['聽這一間房的', '書自己的（系統提示・後）', '聽這一間房的'],
+    '⚠️ 空選項要說出「不指定的話會用什麼」——書自己有的那一本不適用「聽這一間的」',
+  )
+  // 選了就要送出去，而且**只動那一本**。
   calls.length = 0
-  peeks[0].props.onClick()
+  posSelects[1].props.onChange({ target: { value: 'system-before' } })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const wrote = calls.filter((one) => one.op === 'room.write').pop()
+  assert.deepEqual(
+    wrote.args.patch.worldbookOverrides.輸出格式,
+    { position: 'system-before' },
+    '⚠️ 書自己指定過的那一本也要寫得進去（這正是 2.6.69 修的那件事）',
+  )
+  assert.deepEqual(wrote.args.patch.worldbookOverrides.酒館, { position: 'in-chat' }, '別的書的覆寫不能被清掉')
+
+  const tags = collect(tree, (el) => el.props.className === 'dsh-tv-posTag')
+  assert.deepEqual(tags.map((one) => String(one.props.children)), ['書自訂'], '只有那一本有標籤（字縮短了）')
+  assert.match(String(tags[0].props.title), /系統提示・後/, '標籤要寫出書自己指定成什麼')
+
+  // ⑦ 房間那一層的預設還在（三態那一格）——a ＋ b ＋ c，不是只有 b ＋ c。
+  const roomDefault = collect(tree, (el) => el.props['aria-label'] === '這一間房的藏書預設放在哪')[0]
+  assert.ok(roomDefault !== undefined, '「這一間房的藏書預設放在哪」要留著')
+
+  /**
+   * ⑧ **「▸ 條目」：按了才讀**（不在載入時把每一本都讀進來），再按一次收起。
+   *
+   * ⚠️ 它走的是 `worldbook.roomEntries`（不是 `worldbook.read`）：那一支把
+   * **每一條的鍵**與**這一間房算完的 order** 一起給——客戶端自己推鍵就會走散
+   * （症狀：覆寫存到不存在的鍵上、永遠不生效，而且是安靜的）。
+   */
+  calls.length = 0
+  const peek = collect(tree, (el) => el.props.className === 'dsh-tv-btn')[0]
+  peek.props.onClick()
   await new Promise((resolve) => setTimeout(resolve, 0))
   assert.deepEqual(
     calls.map((one) => one.op + ':' + (one.args === undefined ? '' : String(one.args.book))),
-    ['worldbook.read:酒館'],
-    '「內容」要讀那一本的內容',
+    ['worldbook.roomEntries:酒館'],
+    '按「▸ 條目」才讀那一本（而且走的是 roomEntries）',
   )
+  const openedTree = renderComponent(RoomBooksPane, props)
+  const opened = collect(openedTree, (el) => el.props.className === 'dsh-tv-btn')
+  assert.equal(String(opened[0].props.children), '▾ 條目', '展開之後要變 ▾')
+  assert.equal(opened[0].props['aria-expanded'], 'true', 'aria-expanded 要跟著換')
+  const peekBody = collect(openedTree, (el) => el.props.className === 'dsh-tv-bookPeek')
+  assert.equal(peekBody.length, 1, '展開的是那一本（只有一個預覽區塊）')
+  assert.deepEqual(
+    collect(peekBody[0], (el) => el.props.className === 'dsh-tv-peekBodyText').map((one) => String(one.props.children)),
+    ['內文一', '內文二'],
+    '預覽要把每一條的內文畫出來——但它是**唯讀**的（下面沒有任何改內容的欄位）',
+  )
+  assert.deepEqual(
+    collect(peekBody[0], (el) => el.props.className === 'dsh-tv-peekHead').map((one) => String(one.props.children[0])),
+    ['第一條', '第二條'],
+    '標題由宿主半算（`comment` 優先、退回 `name`）',
+  )
+
+  /**
+   * ⑨ ⚠️ **條目的優先序**（這一輪真正的功能）：展開之後每一條一格。
+   *
+   * ⚠️ **永遠是一個數字**（使用者要的：不要空格子——「不設定就直接零，那麼我
+   * 輕輕一改就無法復原」）：沒調過就顯示**書自己的值**，而**灰色的**那一種
+   * ＝那個數字是書的（不在這一間房指定）。打回書自己的數字 ⇒ 真的還原。
+   */
+  const orderInputs = collect(peekBody[0], (el) => String(el.props['aria-label'] ?? '').includes(' 的優先序'))
+  assert.equal(orderInputs.length, 2, '一條一格優先序')
+  assert.deepEqual(
+    orderInputs.map((one) => String(one.props.value)),
+    ['950', '200'],
+    '⚠️ **永遠有數字**：第一條這一間房調成 950、第二條沒調過 ⇒ 顯示書自己的 200',
+  )
+  assert.deepEqual(
+    orderInputs.map((one) => String(one.props.className).includes('dsh-tv-prioInherit')),
+    [false, true],
+    '⚠️ 灰字＝那個數字是**書自己的**（不在這一間房指定）',
+  )
+  assert.deepEqual(
+    orderInputs.map((one) => one.props.placeholder === undefined),
+    [true, true],
+    '⚠️ 不可以有 `placeholder`——那代表「格子可以是空的」，而使用者打回來的正是那一版',
+  )
+  assert.deepEqual(
+    orderInputs.map((one) => one.props.min),
+    [exportsObject.__orderLimits.min, exportsObject.__orderLimits.min],
+    '`min` 要跟宿主半的 ORDER_LIMITS 一致（不然畫面上收得住、宿主半丟掉）',
+  )
+  // 改了 ⇒ 送 `room.write` 的 `worldbookEntryOverrides`（**整份**，宿主半是整份取代）。
+  calls.length = 0
+  orderInputs[1].props.onChange({ target: { value: '600' } })
+  orderInputs[1].props.onBlur()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const entryWrite = calls.filter((one) => one.op === 'room.write').pop()
+  assert.deepEqual(
+    entryWrite.args.patch.worldbookEntryOverrides,
+    { 酒館: { 0: { order: 950 }, 1: { order: 600 } } },
+    '⚠️ 只動那一條（其他條目的覆寫原樣帶著——漏帶的症狀是「調了 B，A 的自己消失」）',
+  )
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(entryWrite.args.patch, 'worldbookOverrides'),
+    false,
+    '⚠️ 調條目不該送出書層的覆寫（沒送＝不動）',
+  )
+  // 打回**書自己的值** ⇒ 把那一條的覆寫刪掉（真的還原）。
+  calls.length = 0
+  orderInputs[0].props.onChange({ target: { value: '100' } })
+  orderInputs[0].props.onBlur()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const restored = calls.filter((one) => one.op === 'room.write').pop()
+  assert.deepEqual(
+    restored.args.patch.worldbookEntryOverrides,
+    { 酒館: { 1: { order: 600 } } },
+    '⚠️ 打回書自己的值 ⇒ 那一條的覆寫**刪掉**（不是留一個 100 在那裡）',
+  )
+  // 沒改就不送；清空＝不改（不是 0）。
+  calls.length = 0
+  orderInputs[1].props.onChange({ target: { value: '200' } })
+  orderInputs[1].props.onBlur()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual(calls, [], '沒改就不送（連按兩次 Tab 不該寫兩次檔）')
+  orderInputs[1].props.onChange({ target: { value: '' } })
+  orderInputs[1].props.onBlur()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual(calls, [], '清空 ＝ 不改（手滑刪掉不該變成一次寫入；要還原就打回原來的數字）')
+  // 打錯的字不送出去，而且要說出來。
+  orderInputs[1].props.onChange({ target: { value: 'abc' } })
+  orderInputs[1].props.onBlur()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual(calls.filter((one) => one.op === 'room.write'), [], '不是整數就不送')
+  const errTree = renderComponent(RoomBooksPane, props)
+  assert.ok(
+    collect(errTree, (el) => el.props.className === 'dsh-tv-err').some((one) => String(one.props.children).includes('整數')),
+    '⚠️ 打錯要看得見（靜靜地不送＝使用者以為存好了）',
+  )
+  // 每一條的內容**只有一個**文字區塊（唯讀）：沒有 input/textarea 給內容。
+  assert.equal(
+    collect(peekBody[0], (el) => el.type === 'textarea').length,
+    0,
+    '⚠️ 房間那一頁**不准**有改內容的欄位（使用者：「不包括內容」）',
+  )
+
+  calls.length = 0
+  opened[0].props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual(calls, [], '再按一次是「收起」——不該再讀一次 rpc')
 
   exportsObject.__chat.setContext(null)
   reactImpl.resetHooks()
-  __setZone('hall')
-  console.log('4w. 房間藏書列 OK — 書名＝去改它（換分區又換面板）、交接值撿走就清、內容是就地展開')
+  exportsObject.__setZone('hall')
+  console.log(
+    '4w. 房間藏書列 OK — 開關／位置（合併不誤刪）／展開後的條目優先序（灰字＝書自己的、打回就還原）、標籤排最左、內容唯讀',
+  )
 }
 
 /* --------- 欄位說明：`?` 平時摺疊（2.6.60）--------- */

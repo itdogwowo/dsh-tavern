@@ -11,15 +11,21 @@ import assert from 'node:assert/strict'
 
 const {
   DEFAULT_BUDGET_CHARS,
+  ORDER_LIMITS,
   SELECTIVE_LOGIC,
   WORLDBOOK_POSITION_INFO,
   WORLDBOOK_POSITIONS,
   activationOf,
+  applyBookOverride,
   collectLore,
+  entryKeyOf,
+  entryOverridesOf,
   groupByPosition,
   matchesKey,
   normalizeEntries,
+  normalizeOrder,
   normalizePosition,
+  orderOf,
   positionOf,
   prependLore,
   textOfEntries,
@@ -196,6 +202,158 @@ const {
   console.log('4. 收集與排序 OK — order 排序、uid 決勝、預算截斷、空輸入')
 }
 
+/* ------------------- 房間對條目優先序的覆寫（2.6.70）------------------- */
+
+{
+  /**
+   * 使用者：
+   *   > 酒館有個圖書館，開房間的時候會將所有預設放進去，然後房間自己可以微調修改，
+   *   > 不包括內容，只是修改位置以及優先序
+   *
+   * ⚠️ **這一節的第一版做的是「書層」的優先序**（一本書一個數字、整本排在別本
+   * 前面），而使用者打回來：
+   *
+   *   > 等等為什麼多了這些東西，我說的次序可能和你說的次序不一樣，
+   *   > 我看見**世界書裏面有不同的項目設定次序**，我說的是那個，
+   *   > 你獨立給了我另一個次序了
+   *
+   * 他看得到的是**條目自己的 `order`**（「📖 藏書 → 點一本書 → 每一條條目」
+   * 下面標著「優先序」的那個數字）。所以現在的規矩是：
+   *
+   *   **這一間房對某一條的覆寫 → 書自己的 `order` → ST 的預設 100**
+   *
+   * 覆寫存在 `room.json` 的 `worldbookEntryOverrides`——**書的檔案一個字都不會
+   * 被改**（那是使用者的 ST 檔）。
+   */
+
+  // ① 正規化：`null` ＝ 沒指定／不合法（**與 0 不同**——0 是合法的 order）。
+  assert.equal(normalizeOrder(0), 0, '0 是合法的 order（ST 的慣例裡 0～19 是「錦上添花」那一級）')
+  assert.equal(normalizeOrder(-5), -5, '負數合法（排到最後）')
+  assert.equal(normalizeOrder('950'), 950, '數字字串收（`<input>` 送的就是字串）')
+  assert.equal(normalizeOrder(1.5), null, '小數不合法')
+  assert.equal(normalizeOrder('abc'), null, '不是數字不合法')
+  assert.equal(normalizeOrder(''), null, '空字串＝沒指定')
+  assert.equal(normalizeOrder(null), null, 'null ＝沒指定')
+  assert.equal(normalizeOrder(NaN), null, 'NaN 不合法')
+  assert.equal(normalizeOrder(ORDER_LIMITS.max + 1), null, '超出上限不合法')
+  assert.equal(normalizeOrder(ORDER_LIMITS.max), ORDER_LIMITS.max, '上下限本身合法')
+
+  /**
+   * ② **鍵的規則是 `uid` 優先**（沒有 `uid` 才用 `#<索引>`）。
+   *
+   * ⚠️ 這一條重要是因為**用索引當鍵會安靜地錯**：書裡插一條，整份覆寫就位移到
+   * 別的條目上——使用者只會覺得「我設定的順序自己跑了」。`uid` 是 ST 給條目的
+   * 識別碼，改內容、改關鍵字都不會動到它。
+   */
+  assert.equal(entryKeyOf({ uid: 7, content: 'x' }, 3), '7', '有 uid 就用 uid（不是索引）')
+  assert.equal(entryKeyOf({ uid: 0 }, 5), '0', '⚠️ uid 0 也是有效的（看型別，不是看 truthy）')
+  assert.equal(entryKeyOf({ content: 'x' }, 3), '#3', '沒有 uid 才退回索引')
+  assert.equal(entryKeyOf({ uid: 'nope' }, 2), '#2', 'uid 不是整數 ⇒ 當作沒有')
+  assert.equal(entryKeyOf({ uid: 1.5 }, 2), '#2', 'uid 是小數 ⇒ 當作沒有')
+  assert.equal(entryKeyOf(null, 4), '#4', '壞條目也不丟錯')
+
+  // ③ `orderOf`：這一間房的覆寫 → 書自己的 → 100。
+  const entry = { uid: 0, order: 200, content: 'x' }
+  assert.equal(orderOf(entry, 0, undefined, 'A'), 200, '沒有覆寫 ⇒ 書自己的')
+  assert.equal(orderOf(entry, 0, { A: { 0: { order: 900 } } }, 'A'), 900, '房間的覆寫贏')
+  assert.equal(orderOf(entry, 0, { A: { 0: { order: 0 } } }, 'A'), 0, '⚠️ 覆寫成 0 是有效的（不是「沒指定」）')
+  assert.equal(orderOf({ uid: 0, content: 'x' }, 0, undefined, 'A'), 100, '書沒有 order ⇒ ST 的預設 100')
+  assert.equal(orderOf(entry, 0, { B: { 0: { order: 900 } } }, 'A'), 200, '別本書的覆寫不關它的事')
+  assert.equal(orderOf(entry, 0, { A: { 1: { order: 900 } } }, 'A'), 200, '別條的覆寫不關它的事')
+  assert.equal(orderOf(entry, 0, { A: { 0: { order: 1.5 } } }, 'A'), 200, '壞覆寫當作沒有（不丟錯）')
+  assert.equal(entryOverridesOf({ A: { 0: { order: 1 } } }, 'A')['0'].order, 1, '取某一本書那一包')
+  assert.deepEqual(entryOverridesOf(null, 'A'), {}, '壞輸入回空物件')
+
+  /**
+   * ④ **排序真的照覆寫走**（功能本體）。
+   *
+   * 同一本書裡兩條：`order` 100 與 900。房間把 100 那一條調到 950 ⇒ 它要排前面。
+   */
+  const book = {
+    id: '酒館',
+    data: {
+      entries: {
+        0: { uid: 0, comment: '普通', content: '普通條目', order: 100, constant: true },
+        1: { uid: 1, comment: '重要', content: '重要條目', order: 900, constant: true },
+      },
+    },
+  }
+  const plain = collectLore([book], '', {})
+  assert.deepEqual(plain.entries.map((one) => one.content), ['重要條目', '普通條目'], '沒覆寫 ⇒ 照書自己的 order')
+  assert.deepEqual(plain.entries.map((one) => one.key), ['1', '0'], '每一條要帶著它的鍵（房間那一頁靠它送 patch）')
+  assert.deepEqual(plain.entries.map((one) => one.ownOrder), [900, 100], '`ownOrder` 是**書自己的**（還原要用它）')
+
+  const overridden = collectLore([book], '', { entryOverrides: { 酒館: { 0: { order: 950 } } } })
+  assert.deepEqual(
+    overridden.entries.map((one) => one.content),
+    ['普通條目', '重要條目'],
+    '⚠️ 這一間房把 uid 0 調到 950 ⇒ 它排到 900 前面（房間的覆寫真的傳到排序）',
+  )
+  assert.deepEqual(overridden.entries.map((one) => one.order), [950, 900], '`order` 是算完的')
+  assert.deepEqual(overridden.entries.map((one) => one.ownOrder), [100, 900], '⚠️ `ownOrder` 仍然是書自己的值')
+
+  /**
+   * ⑤ **它不改書**（最重要的那一條）：`collectLore` 不可以動到傳進來的物件。
+   *
+   * ⚠️ 書的檔案由 `workspace.js` 負責（房間這條路根本不會寫 `worldbooks/`），
+   * 但**這裡也不可以改到呼叫端手上那一份**：`readWorldbooks()` 有 mtime 快取，
+   * 改到它就會污染下一個房間。
+   */
+  const frozen = JSON.stringify(book)
+  collectLore([book], '', { entryOverrides: { 酒館: { 0: { order: 950 } } } })
+  assert.equal(JSON.stringify(book), frozen, '⚠️ 排完之後那一本書要一字不差（快取共用同一個物件）')
+
+  /**
+   * ⑥ **預算是先到先得**——所以調高 `order` 就是「這一條先吃預算」。
+   *    這是使用者調這一格時真正的代價，要用測試寫出來。
+   */
+  const budgeted = collectLore([book], '', {
+    entryOverrides: { 酒館: { 0: { order: 950 } } },
+    budgetChars: 5,
+  })
+  assert.deepEqual(budgeted.entries.map((one) => one.content), ['普通條目'], '排前面的先吃到預算')
+  assert.equal(budgeted.truncated, true, '被擠掉的那一條要回報 truncated')
+
+  /**
+   * ⑦ **`order` 相同的決勝仍然是 uid 遞增**（可重現）——這一條是「既有酒館
+   * 一行都不變」的保證：沒有覆寫時排序鍵與 2.6.69 一字不差。
+   */
+  const tieBooks = [
+    {
+      id: 'A',
+      data: {
+        entries: {
+          0: { uid: 0, content: 'a0', order: 100, constant: true },
+          1: { uid: 1, content: 'a1', order: 300, constant: true },
+        },
+      },
+    },
+    { id: 'B', data: { entries: { 0: { uid: 0, content: 'b0', order: 300, constant: true } } } },
+  ]
+  const tie = collectLore(tieBooks, '', {})
+  assert.deepEqual(
+    tie.entries.map((one) => one.content),
+    ['b0', 'a1', 'a0'],
+    '⚠️ 同 order ⇒ **uid 遞增（跨書也比）**——b0 與 a1 都是 300，b0 的 uid 是 0 所以在前',
+  )
+  // 房間把 A 的 uid 0 調到 300 ⇒ 三條同 order，仍然照 uid 排（可重現）。
+  const tie2 = collectLore(tieBooks, '', { entryOverrides: { A: { 0: { order: 300 } } } })
+  assert.deepEqual(
+    tie2.entries.map((one) => one.content),
+    ['a0', 'b0', 'a1'],
+    '同 order 的三條照 uid 遞增（a0 與 b0 的 uid 都是 0 ⇒ a0 在前，因為 A 在 B 前面）',
+  )
+
+  // ⑧ 房間關掉一本書 ＋ 條目覆寫可以同時存在（兩者走不同的鍵，互不干擾）。
+  const offed = collectLore([book], '', {
+    bookOverrides: { 酒館: { enabled: false } },
+    entryOverrides: { 酒館: { 0: { order: 950 } } },
+  })
+  assert.deepEqual(offed.entries, [], '關掉的書整本不進去（覆寫再高也一樣）')
+
+  console.log('4b. 條目優先序 OK — uid 當鍵／房間覆寫贏過書自己的／不改書／先吃預算／可重現')
+}
+
 /* ------------------------------- 注入到訊息 ------------------------------- */
 
 {
@@ -335,7 +493,7 @@ const {
   assert.equal(textOfEntries(grouped['system-after']), 'SPEC', '接回文字')
   assert.equal(textOfEntries(null), '', 'null 回空字串')
 
-  console.log('7. 注入位置 OK — 書→房→酒館→in-chat、ST 的數字接得住、分三堆、排序不變')
+  console.log('7. 注入位置 OK — 房（指定那一本）→書→房預設→酒館→in-chat、ST 的數字接得住、分三堆、排序不變')
 }
 
 /* ------------------- 房間對「個別世界書」的覆寫（2.6.64）------------------- */
@@ -356,7 +514,7 @@ const {
   const plain = collectLore([a, b], '', { defaultPosition: 'in-chat' })
   assert.deepEqual(ids(plain), ['A-LORE', 'B-LORE'], '沒有覆寫時兩本都在')
   assert.equal(a.data.position, undefined, '⚠️ 覆寫不可以改到使用者的書')
-  assert.equal(a.data.positionIfUnset, undefined, '⚠️ 也不可以把影子欄位留在原物件上')
+  assert.equal(a.data.positionOverride, undefined, '⚠️ 也不可以把影子欄位留在原物件上')
 
   // ② 關掉一本 ⇒ 它整本不出現（另一本不受影響）。
   const off = collectLore([a, b], '', { defaultPosition: 'in-chat', bookOverrides: { B: { enabled: false } } })
@@ -370,7 +528,16 @@ const {
   assert.equal(moved.entries.find((one) => one.content === 'B-LORE').position, 'system-after', 'B 要換位置')
   assert.equal(moved.entries.find((one) => one.content === 'A-LORE').position, 'in-chat', 'A 照舊')
 
-  // ④ ⚠️ **書自己指定的位置贏過房間的覆寫**——那條優先序是這個功能的地基。
+  /**
+   * ④ ⚠️ **房間指定的位置贏過書自己的**（2.6.69 改的）。
+   *
+   * 2.6.64–2.6.68 的順序是相反的（書贏），結果是**書自己指定過的那一本，
+   * 房間怎麼選都不會生效**——那一格能改卻改不動，只好在 UI 上鎖起來。
+   * 使用者要的是「房間可以設定位置」，所以房間那一層排到最前面。
+   *
+   * ⚠️ 注意這**只影響「這一間房真的指定了這一本」**的情況：
+   * 沒有那一筆覆寫時，書自己的值照樣贏過房間與酒館的**預設**（下面 ⑤ 驗）。
+   */
   const fixed = {
     id: 'C',
     data: { position: 'system-before', entries: { 0: { uid: 0, content: 'C-LORE', constant: true } } },
@@ -381,8 +548,8 @@ const {
   })
   assert.equal(
     roomTried.entries[0].position,
-    'system-before',
-    '⚠️ 書自己指定的位置**贏過**房間的覆寫（書是最明確的意圖）',
+    'system-after',
+    '⚠️ 房間指定的位置**贏過**書自己的（房間是更窄、更晚決定的那一層）',
   )
   // 但房間還是可以**關掉**它（那是不同的軸：要不要用 vs 放在哪）。
   assert.equal(
@@ -391,13 +558,21 @@ const {
     '房間仍然可以關掉一本「自己指定了位置」的書',
   )
 
+  // ⑤ 房間**沒有**指定那一本時，書自己的值照樣贏過「這一間房的預設」與酒館的預設。
+  const bookWins = collectLore([fixed], '', {
+    defaultPosition: 'in-chat',
+    roomPosition: 'system-after',
+    bookOverrides: { 別的書: { position: 'system-after' } },
+  })
+  assert.equal(bookWins.entries[0].position, 'system-before', '⚠️ 房間沒指定的話，書自己的還是贏過那些「預設」')
+
   // ⑤ 壞覆寫不可以丟錯，也不可以讓書整本消失。
   for (const junk of [null, 'x', 7, [], { A: 'x' }, { A: null }, { 不存在的書: { enabled: false } }]) {
     const out = collectLore([a, b], '', { defaultPosition: 'in-chat', bookOverrides: junk })
     assert.equal(out.entries.length >= 1, true, `${JSON.stringify(junk)} 不可以讓所有書消失`)
   }
 
-  console.log('8. 房間的逐書覆寫 OK — 關掉一本、指定位置、書自己指定贏過房間、壞覆寫不丟錯')
+  console.log('8. 房間的逐書覆寫 OK — 關掉一本、指定位置（贏過書自己）、沒指定時書自己仍贏過預設、壞覆寫不丟錯')
 }
 
 /* ----------------------------- 跟 default 對齊 ---------------------------- */

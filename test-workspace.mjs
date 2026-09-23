@@ -1353,6 +1353,26 @@ try {
       /找不到這本世界書/,
       '不存在的書要明確報錯',
     )
+    /**
+     * ⚠️ **空字串／`null` ＝ 把 `position` 刪掉**（2.6.70 的三態）。
+     *
+     * 在那之前畫面上寫著「要回到跟著酒館預設，請到原始 JSON 把 position 刪掉」
+     * ——那是一個**做不到的設定**（這條路上沒有刪欄位的辦法）。
+     */
+    const unset = await ws6.writeWorldbookPosition(id, null)
+    assert.equal(unset, null, '清掉時回 null')
+    assert.equal(
+      'position' in JSON.parse(await readFile(join(root, 'worldbooks', `${id}.json`), 'utf8')),
+      false,
+      '⚠️ 而且檔案裡真的沒有那個鍵了',
+    )
+    assert.equal(
+      (await ws6.worldbookPositions()).books.find((b) => b.id === id).explicit,
+      false,
+      '清掉之後 `explicit` 要回到 false（書自己沒指定了）',
+    )
+    // 放回去（後面的斷言要用）。
+    await ws6.writeWorldbookPosition(id, 'system-after')
     // 而 `writeSettings` 那一格是**回報**（dropped），不是丟錯——同生成參數的規矩。
     const bad = await ws6.writeSettings({ worldbookPosition: 'nope' })
     assert.equal(bad.worldbookPosition, 'system-before', '⚠️ 壞值不可以覆蓋原本的值')
@@ -1370,6 +1390,119 @@ try {
     )
 
     console.log('18. 世界書位置 OK — 只改一個欄位、ST 欄位不掉、書蓋過酒館、壞值回報')
+  }
+
+  /* --- 18b. 房間對**條目優先序**的覆寫（2.6.70）---------------------------- */
+  {
+    /**
+     * 使用者：
+     *   > 酒館有個圖書館，開房間的時候會將所有預設放進去，然後房間自己可以微調修改，
+     *   > 不包括內容，只是修改位置以及優先序
+     *
+     * ⚠️ **這一節的第一版做的是「書層」的優先序**（`worldbookOverrides[id].priority`），
+     * 使用者驗收時打回來：
+     *
+     *   > 我看見**世界書裏面有不同的項目設定次序**，我說的是那個，
+     *   > 你獨立給了我另一個次序了
+     *
+     * 所以現在調的是**條目自己的 `order`**（他看得到的那個），值存在
+     * `room.json` 的 `worldbookEntryOverrides`——**書的檔案一個字都不會被改**。
+     *
+     * 這一節釘住四件事：
+     *   1. 房間的覆寫存得下去、讀得回來（`roomEntries`），而且**不動書**
+     *   2. **鍵是 `uid`**（沒有 uid 才用 `#<索引>`）——鍵錯了會覆寫到別的條目上
+     *   3. 三態：`order: null` ＝ 還原成書自己的值
+     *   4. 壞值（不存在的書／不存在的條目／不是整數）**回報**而且不寫進檔案
+     */
+    const ws7 = new TavernWorkspace(root)
+    const bookId = await ws7.writeWorldbook('', {
+      name: '順序書',
+      entries: {
+        0: { uid: 4, comment: '第一條', content: 'A', order: 100, constant: true },
+        1: { uid: 9, comment: '第二條', content: 'B', order: 900, constant: true },
+        2: { comment: '沒有 uid', content: 'C', order: 500, constant: true },
+      },
+    })
+    const room = (await ws7.createRoom('甲', '順序房')).room
+
+    // ① 一開始：每一條都是書自己的值，而且 `overridden` 都是 false。
+    const before = await ws7.roomEntries('甲', room, bookId)
+    assert.deepEqual(before.entries.map((one) => one.key), ['4', '9', '#2'], '⚠️ 鍵：uid 優先，沒有 uid 才用 #索引')
+    assert.deepEqual(before.entries.map((one) => one.order), [100, 900, 500], '沒覆寫 ⇒ 書自己的 order')
+    assert.deepEqual(before.entries.map((one) => one.ownOrder), [100, 900, 500], '`ownOrder` 也要回（還原要用）')
+    assert.deepEqual(before.entries.map((one) => one.overridden), [false, false, false], '一條都沒被調過')
+    assert.deepEqual(before.entries.map((one) => one.label), ['第一條', '第二條', '沒有 uid'], '標題由宿主半算（`comment`）')
+    assert.deepEqual(before.entries.map((one) => one.content), ['A', 'B', 'C'], '內容唯讀但要畫得出來')
+
+    // ② 寫一筆覆寫：把 uid 4 那一條拉到最前面。
+    const saved = await ws7.writeRoom('甲', room, {
+      worldbookEntryOverrides: { [bookId]: { 4: { order: 950 } } },
+    })
+    assert.deepEqual(saved.worldbookEntryOverrides, { [bookId]: { 4: { order: 950 } } }, '存得下去')
+    const after = await ws7.roomEntries('甲', room, bookId)
+    assert.deepEqual(after.entries.map((one) => one.order), [950, 900, 500], '這一間房算完的值')
+    assert.deepEqual(after.entries.map((one) => one.ownOrder), [100, 900, 500], '⚠️ 書自己的值不變')
+    assert.deepEqual(after.entries.map((one) => one.overridden), [true, false, false], '只有那一條被調過')
+
+    // ③ ⚠️ **書的檔案一個字都不會被改**（這是這個功能的全部重點）。
+    const raw = JSON.parse(await readFile(join(root, 'worldbooks', `${bookId}.json`), 'utf8'))
+    assert.equal(raw.entries['0'].order, 100, '⚠️ 書裡的 order 不可以被房間改到')
+    assert.equal(raw.entries['1'].order, 900, '別的條目也不可以')
+    assert.equal(raw.entries['2'].order, 500, '沒有 uid 的那一條也不可以')
+    assert.equal('worldbookEntryOverrides' in raw, false, '房間的設定不可以寫進書的檔案')
+
+    // ④ 三態：`order: null` ＝ 把那一條的覆寫刪掉（還原成書自己的）。
+    await ws7.writeRoom('甲', room, { worldbookEntryOverrides: { [bookId]: { 4: { order: null } } } })
+    assert.deepEqual(
+      (await ws7.roomEntries('甲', room, bookId)).entries.map((one) => one.overridden),
+      [false, false, false],
+      'null ＝ 還原（鍵都刪光就整包不見）',
+    )
+    assert.deepEqual(
+      (await ws7.roomEntries('甲', room, bookId)).entries.map((one) => one.order),
+      [100, 900, 500],
+      '還原之後回到書自己的值',
+    )
+
+    // ⑤ 壞值：**回報**（dropped）而且不寫進檔案。
+    const badBook = await ws7.writeRoom('甲', room, {
+      worldbookEntryOverrides: { 不存在的書: { 0: { order: 1 } } },
+    })
+    assert.deepEqual(badBook.worldbookEntryOverrides, {}, '不認得的書不留')
+    assert.ok(badBook.dropped.some((x) => x.includes('沒有這本世界書')), '要回報：' + JSON.stringify(badBook.dropped))
+    const badEntry = await ws7.writeRoom('甲', room, {
+      worldbookEntryOverrides: { [bookId]: { '999': { order: 1 } } },
+    })
+    assert.deepEqual(badEntry.worldbookEntryOverrides, {}, '不存在的條目不留')
+    assert.ok(badEntry.dropped.some((x) => x.includes('沒有這一條')), '要回報：' + JSON.stringify(badEntry.dropped))
+    const badOrder = await ws7.writeRoom('甲', room, {
+      worldbookEntryOverrides: { [bookId]: { 4: { order: 1.5 } } },
+    })
+    assert.deepEqual(badOrder.worldbookEntryOverrides, {}, '不合法的 order 不留')
+    assert.ok(badOrder.dropped.some((x) => x.includes('優先序')), '要回報：' + JSON.stringify(badOrder.dropped))
+    // 數字字串**收**（`<input>` 送的就是字串）。
+    await ws7.writeRoom('甲', room, { worldbookEntryOverrides: { [bookId]: { 4: { order: '777' } } } })
+    assert.equal(
+      (await ws7.roomEntries('甲', room, bookId)).entries[0].order,
+      777,
+      '數字字串收得下來（parse 只該有一份，在宿主半）',
+    )
+
+    // ⑥ 兩層覆寫互不干擾：關掉一本書，條目覆寫還在（它們是不同的鍵）。
+    await ws7.writeRoom('甲', room, { worldbookOverrides: { [bookId]: { enabled: false } } })
+    const listed = await ws7.roomWorldbookPositions('甲', room)
+    assert.equal(listed.books.find((b) => b.id === bookId).enabled, false, '書被這一間房關掉了')
+    assert.deepEqual(
+      listed.entryOverrides,
+      { [bookId]: { 4: { order: 777 } } },
+      '⚠️ 條目覆寫要跟清單一起回去（房間那一頁送 patch 是整份取代，不知道就會清掉別的）',
+    )
+
+    // ⑦ 不存在的書／壞掉的書：`roomEntries` 要**明確報錯**（不是回空的）。
+    await assert.rejects(() => ws7.roomEntries('甲', room, '不存在的書'), /找不到這本世界書/, '要說出是哪一本')
+    await assert.rejects(() => ws7.roomEntries('甲', '不存在的房', bookId), /找不到這間房/, '房間也要驗')
+
+    console.log('18b. 房間的條目優先序 OK — uid 當鍵、書一個字都不改、三態還原、壞值回報')
   }
 
   /* --- 19. 驗收探針的兩條原始碼契約（2.6.58）-------------------------------- */
@@ -1554,7 +1687,13 @@ try {
     assert.equal(l1.tavern, 'in-chat', '讀得到酒館層')
     assert.equal(l1.room, '', '房間層一開始是空的')
     assert.equal(l1.books.find((b) => b.id === bookId).position, 'in-chat', '沒指定的用酒館的')
-    assert.equal(l1.books.find((b) => b.id === fixedId).position, 'system-before', '⚠️ 書自己指定的最優先')
+    assert.equal(l1.books.find((b) => b.id === fixedId).position, 'system-before', '沒人指定的話，書自己的贏過酒館的預設')
+    assert.equal(
+      l1.books.find((b) => b.id === fixedId).ownPosition,
+      'system-before',
+      '⚠️ 也要回報**書自己的**那一個值（房間那一頁的空選項標籤靠它，才不會說謊）',
+    )
+    assert.equal(l1.books.find((b) => b.id === bookId).ownPosition, '', '書沒指定 ⇒ 空字串')
 
     // ② 房間層蓋過酒館。
     const saved = await ws8.writeRoom('甲', room, { worldbookPosition: 'system-after' })
@@ -1569,8 +1708,26 @@ try {
     assert.equal(
       l2.books.find((b) => b.id === fixedId).position,
       'system-before',
-      '⚠️ 書自己指定仍然最優先（房間蓋不過它）',
+      '⚠️ 房間的「預設」蓋不過書自己的（預設只是一種 fallback）',
     )
+
+    // ②b **房間對這一本書的指定 ⇒ 贏過書自己的**（2.6.69 改的）。
+    //
+    //     2.6.64–2.6.68 的順序是「書贏」，於是書自己指定過的那一本在房間裡
+    //     怎麼選都不生效（UI 只好把它鎖起來）。使用者要的是「房間可以設定位置」。
+    await ws8.writeRoom('甲', room, { worldbookOverrides: { [fixedId]: { position: 'in-chat' } } })
+    const l2b = await ws8.roomWorldbookPositions('甲', room)
+    assert.equal(
+      l2b.books.find((b) => b.id === fixedId).position,
+      'in-chat',
+      '⚠️ 房間指定的位置贏過書自己的——不然房間那一格能改卻改不動',
+    )
+    assert.equal(
+      l2b.books.find((b) => b.id === fixedId).ownPosition,
+      'system-before',
+      '⚠️ `position` 是房間算完的，`ownPosition` 仍然是書自己的（兩個都在，才驗得出差別）',
+    )
+    await ws8.writeRoom('甲', room, { worldbookOverrides: null })
 
     // ③ **三態**：`null` ＝ 聽酒館的（不是一個位置）。
     const back = await ws8.writeRoom('甲', room, { worldbookPosition: null })
@@ -1604,7 +1761,7 @@ try {
       '⚠️ 酒館層那一支只看酒館的預設（房間的值不關它的事）',
     )
 
-    console.log('21. 房間的藏書位置 OK — 三態、房間蓋過酒館、書最優先、兩支 op 答不同的問題')
+    console.log('21. 房間的藏書位置 OK — 三態、房間蓋過酒館、房間指定的蓋過書、兩支 op 答不同的問題')
   }
 
   /* --- 22. 房間對個別世界書的覆寫（2.6.64）------------------------------- */

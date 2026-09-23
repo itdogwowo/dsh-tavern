@@ -1275,10 +1275,10 @@ function pngCard(entries) {
   console.log('11i. stop 開關 OK — 走真的 HTTP：三態都存得下去、false 不會被當成「沒送」、壞值回報')
 }
 
-/* --- 11j. 世界書的注入位置走真的 HTTP 一圈（2.6.59）---------------------- */
+/* --- 11j. 世界書的注入位置走真的 HTTP 一圈（2.6.59／2.6.70）-------------- */
 {
   /**
-   * ⚠️ 這一條的重點是**「只改一個欄位」**：`worldbook.position` 只動那本書的
+   * ⚠️ 這一條的重點是**「只改那一個欄位」**：`worldbook.position` 只動那本書的
    * `position`，其餘（ST 的幾十個欄位）一個都不能掉。
    *
    * 為什麼要繞真的 HTTP：中間隔著「整本讀出來、改一格、原子寫回去」，
@@ -1320,14 +1320,34 @@ function pngCard(entries) {
   assert.equal(raw.entries['0'].token_budget, 400, '⚠️ 條目裡的欄位也不可以掉')
   assert.equal(raw.entries['0'].content, 'SPEC', '內容不變')
 
-  // ④ 酒館層的預設（走 settings.write），而且不合法要回報。
+  /**
+   * ④ ⚠️ **`where: null` ＝ 把書裡的 `position` 刪掉**（2.6.70 補的三態）。
+   *
+   * 在那之前畫面上寫著「要回到『跟著酒館預設』，請到原始 JSON 把 position 刪掉」
+   * ——那是一個**叫使用者去用別的工具**的設定。
+   */
+  const cleared = await callRpc('worldbook.position', { id: tavernId, book: bookId.value, where: null })
+  assert.equal(cleared.ok, true, '清空位置應該成功：' + cleared.error)
+  assert.equal(cleared.value.position, null, '清掉時回 null')
+  const rawCleared = JSON.parse(readFileSync(join(posShop, 'worldbooks', `${bookId.value}.json`), 'utf8'))
+  assert.equal('position' in rawCleared, false, '⚠️ 而且檔案裡真的沒有那個鍵了')
+  assert.deepEqual(rawCleared.keepMe, { nested: true }, '清位置也不可以掉別的欄位')
+  assert.equal(
+    (await callRpc('worldbook.positions', { id: tavernId })).value.books.find((b) => b.id === bookId.value).explicit,
+    false,
+    '清掉之後 `explicit` 要回到 false（書自己沒指定了）',
+  )
+  // 放回去（後面的斷言要用）。
+  await callRpc('worldbook.position', { id: tavernId, book: bookId.value, where: 'system-after' })
+
+  // ⑤ 酒館層的預設（走 settings.write），而且不合法要回報。
   const saved = await callRpc('settings.write', { id: tavernId, patch: { worldbookPosition: 'system-before' } })
   assert.equal(saved.value.worldbookPosition, 'system-before', '酒館層預設存得下去')
   const badFallback = await callRpc('settings.write', { id: tavernId, patch: { worldbookPosition: 'nope' } })
   assert.equal(badFallback.value.worldbookPosition, 'system-before', '⚠️ 壞值不可以覆蓋原本的值')
   assert.match(String((badFallback.value.dropped ?? [])[0]), /^worldbookPosition/, '要回報是它被丟掉')
 
-  // ⑤ 壞位置／不存在的書 ⇒ **明確報錯**（不是靜靜落回預設）。
+  // ⑥ 壞位置／不存在的書 ⇒ **明確報錯**（不是靜靜落回預設）。
   const badWhere = await callRpc('worldbook.position', { id: tavernId, book: bookId.value, where: 'nope' })
   assert.equal(badWhere.ok, false, '不合法的位置要失敗')
   assert.match(String(badWhere.error), /位置要是/, '而且要說得出合法值：' + String(badWhere.error))
@@ -1335,11 +1355,26 @@ function pngCard(entries) {
   assert.equal(noBook.ok, false, '不存在的書要失敗')
   assert.match(String(noBook.error), /找不到這本世界書/, '要說出是哪一本')
 
+  /**
+   * ⑦ ⚠️ **2.6.70 一度加過的 `worldbook.meta` 真的不在了。**
+   *
+   * 那一版把「書層的優先序」與位置收在同一支 op；那個優先序是**我自己發明的
+   * 抽象**（使用者要的是條目自己的 `order`），所以整組拆掉了。留一句斷言是因為
+   * **兩支同義的 op 在功能上完全看不出來**（同 12b 拆 `chat.*` 的理由）。
+   */
+  const gone = await callRpc('worldbook.meta', { id: tavernId, book: bookId.value, position: 'in-chat' })
+  assert.equal(gone.ok, false, '舊 op 不該還在')
+  assert.match(String(gone.error), /unknown op/, '要是「不認識這個 op」，不是「操作失敗」')
+  assert.equal(
+    readFileSync(new URL('./lib/client.js', import.meta.url), 'utf8').includes("'worldbook.meta'"),
+    false,
+    '⚠️ 客戶端也不該還在送舊名字（宿主半拆了、客戶端還在送的症狀是「按了沒反應」）',
+  )
+
   await callRpc('tavern.remove', { id: tavernId })
   rmSync(posShop, { recursive: true, force: true })
-  console.log('11j. 世界書位置 OK — 走真的 HTTP：只改一個欄位、ST 欄位不掉、壞值報錯')
+  console.log('11j. 世界書位置 OK — 走真的 HTTP：只改一個欄位、ST 欄位不掉、清得掉、壞值報錯')
 }
-
 /* --- 11k. 世界書位置的**房間那一層**走真的 HTTP（2.6.62）----------------- */
 {
   // ⚠️ 兩支 op 答的是**不同的問題**，而拿錯那一支會顯示錯的位置（安靜的錯）：
@@ -1399,9 +1434,100 @@ function pngCard(entries) {
   })
   assert.match(String((bad.value.dropped ?? [])[0]), /^worldbookPosition/, '要回報是它被丟掉')
 
+  /**
+   * ⑤ **條目層的優先序**走真的 HTTP（2.6.70）：房間調得到、**書一個字都不會被改**。
+   *
+   * ⚠️ 這一條驗的是**接線**：`lib/worldbook.js` 的排序在 `test-worldbook.mjs`
+   * §4b 有測試，但那一條驗不到「房間那一層的值有沒有真的走完 HTTP 一圈、
+   * 有沒有寫進 room.json、有沒有動到書的檔案」。
+   */
+  const entryShop = join(roomPosShop, 'worldbooks', `${bookId}.json`)
+  const written = await callRpc('worldbook.write', {
+    id: tavernId,
+    book: bookId,
+    payload: {
+      name: '沒指定',
+      entries: {
+        0: { uid: 0, comment: '普通', content: '普通條目', order: 100, constant: true },
+        1: { uid: 1, comment: '重要', content: '重要條目', order: 900, constant: true },
+      },
+    },
+  })
+  assert.equal(written.ok, true, '覆寫那一本書：' + written.error)
+
+  // ① 讀：每一條帶著**鍵**與書自己的 `order`（房間那一頁要靠鍵送 patch）。
+  const entriesBefore = await callRpc('worldbook.roomEntries', {
+    id: tavernId,
+    character: '老闆娘',
+    room,
+    book: bookId,
+  })
+  assert.equal(entriesBefore.ok, true, 'worldbook.roomEntries 應該成功：' + entriesBefore.error)
+  assert.deepEqual(entriesBefore.value.entries.map((one) => one.key), ['0', '1'], '鍵是 uid')
+  assert.deepEqual(entriesBefore.value.entries.map((one) => one.order), [100, 900], '沒覆寫 ⇒ 書自己的 order')
+  assert.deepEqual(entriesBefore.value.entries.map((one) => one.overridden), [false, false], '一條都沒被調過')
+  assert.deepEqual(
+    entriesBefore.value.entries.map((one) => one.content),
+    ['普通條目', '重要條目'],
+    '內容唯讀但要畫得出來（房間那一頁的「▸ 條目」）',
+  )
+
+  // ② 寫：把 uid 0 那一條拉到 950 ⇒ 讀回來要**算完**，而書的檔案**一個字都不動**。
+  const savedOrder = await callRpc('room.write', {
+    id: tavernId,
+    character: '老闆娘',
+    room,
+    patch: { worldbookEntryOverrides: { [bookId]: { 0: { order: 950 } } } },
+  })
+  assert.deepEqual(
+    savedOrder.value.worldbookEntryOverrides[bookId],
+    { 0: { order: 950 } },
+    '⚠️ 條目的覆寫存得下去（與 `worldbookOverrides` 是不同的鍵，互不干擾）',
+  )
+  const entriesAfter = await callRpc('worldbook.roomEntries', {
+    id: tavernId,
+    character: '老闆娘',
+    room,
+    book: bookId,
+  })
+  assert.deepEqual(entriesAfter.value.entries.map((one) => one.order), [950, 900], '這一間房算完的值')
+  assert.deepEqual(entriesAfter.value.entries.map((one) => one.ownOrder), [100, 900], '書自己的值不變（還原要用它）')
+  assert.deepEqual(entriesAfter.value.entries.map((one) => one.overridden), [true, false], '只有那一條被調過')
+  const bookRaw = JSON.parse(readFileSync(entryShop, 'utf8'))
+  assert.equal(bookRaw.entries['0'].order, 100, '⚠️ 書裡的 order **不可以**被房間改到（這是整個功能的底線）')
+  assert.equal(bookRaw.entries['1'].order, 900, '別的條目也不可以')
+  assert.equal('worldbookEntryOverrides' in bookRaw, false, '房間的設定不可以寫進書的檔案')
+
+  // ③ 三態：`order: null` ＝ 還原成書自己的值。
+  await callRpc('room.write', {
+    id: tavernId,
+    character: '老闆娘',
+    room,
+    patch: { worldbookEntryOverrides: { [bookId]: { 0: { order: null } } } },
+  })
+  const entriesReset = await callRpc('worldbook.roomEntries', {
+    id: tavernId,
+    character: '老闆娘',
+    room,
+    book: bookId,
+  })
+  assert.deepEqual(entriesReset.value.entries.map((one) => one.order), [100, 900], 'null ＝ 還原成書自己的值')
+  // ④ 壞值：回報，而且不留一筆沒有作用的設定。
+  const badOrder = await callRpc('room.write', {
+    id: tavernId,
+    character: '老闆娘',
+    room,
+    patch: { worldbookEntryOverrides: { [bookId]: { 999: { order: 1 } } } },
+  })
+  assert.ok(
+    (badOrder.value.dropped ?? []).some((x) => String(x).includes('沒有這一條')),
+    '不存在的條目要回報：' + JSON.stringify(badOrder.value.dropped),
+  )
+  assert.deepEqual(badOrder.value.worldbookEntryOverrides, {}, '⚠️ 壞值不可以留下一筆沒有作用的設定')
+
   await callRpc('tavern.remove', { id: tavernId })
   rmSync(roomPosShop, { recursive: true, force: true })
-  console.log('11k. 房間的藏書位置 OK — 走真的 HTTP：三態、房間蓋過酒館、兩支 op 各答各的')
+  console.log('11k. 房間的藏書 OK — 走真的 HTTP：位置三態、條目優先序（書一個字都不改）、壞值回報')
 }
 
 /* --- 12. 跨半契約：瀏覽器半呼叫的每個 op 都必須存在於宿主半 ---------------- */
