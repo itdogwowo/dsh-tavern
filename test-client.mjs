@@ -2198,20 +2198,36 @@ function spyRpc(seen, extra) {
   await exportsObject.__loadRoomBooks()
   const tree = renderComponent(RoomBooksPane, props)
 
-  // ① 這一頁的按鈕**只有**「▸ 條目」（展開）與說明那顆 `?`——沒有跳轉、沒有第二顆。
+  /**
+   * ① 這一頁的按鈕**只有**「✎ 修改」（跳去 📖 藏書 改）與說明那顆 `?`。
+   *
+   * ⚠️ **2.6.72 換過一次**（使用者）：
+   *
+   *   > ▸ 條目，這個按鈕其實可以是跳轉去修改
+   *   > 然後摺疊功能改為整條都可以摺疊
+   *
+   * 所以「展開」不再是按鈕（改成**整條列**，見 ⑧），而這顆按鈕變成**跳轉**。
+   * ⚠️ 這正是 2.6.66 做過、2.6.68 拿掉的那條路（`jumpToBook` 那一組）——
+   * 所以原始碼裡**應該**又看得到它，那一條斷言要跟著反過來。
+   */
   assert.deepEqual(
     collect(tree, (el) => el.type === 'button').map((one) => String(one.props.className)),
     ['dsh-tv-help', 'dsh-tv-btn', 'dsh-tv-btn', 'dsh-tv-btn'],
-    '⚠️ 一本一顆「▸ 條目」，加上房間預設那一格的說明 `?`——沒有其他動作按鈕',
+    '⚠️ 一本一顆「✎ 修改」，加上房間預設那一格的說明 `?`——沒有其他動作按鈕',
   )
   assert.deepEqual(
     collect(tree, (el) => el.props.className === 'dsh-tv-btn').map((one) => String(one.props.children)),
-    ['▸ 條目', '▸ 條目', '▸ 條目'],
-    '平時是收起來的（`▸`）',
+    ['✎ 修改', '✎ 修改', '✎ 修改'],
+    '每一列一顆「跳去改」',
   )
-  assert.equal(source.includes("'去改它'"), false, '「去改它」連同它那條管線一起拿掉了')
-  assert.equal(source.includes('jumpToBook'), false, '跳轉那條管線不該還留著（死碼）')
-  // ⚠️ 那一列上**沒有**優先序那一格了（書層的順序是 2.6.70 第一版的錯誤）。
+  assert.equal(source.includes("'去改它'"), false, '「去改它」那個字眼沒有回來（現在是「✎ 修改」）')
+  assert.equal(source.includes('function jumpToBook('), true, '⚠️ 跳轉那條管線要**在**（2.6.72 加回來的）')
+  assert.equal(
+    source.includes('pendingBookOpen'),
+    true,
+    '⚠️ 交接格也要在——`MapWorldbooks` 靠它知道要打開哪一本',
+  )
+  // ⚠️ 那一列上**沒有**優先序那一格（書層的順序是 2.6.70 第一版的錯誤）。
   assert.equal(
     collect(tree, (el) => String(el.props['aria-label'] ?? '').endsWith(' 的優先序')).length,
     0,
@@ -2322,18 +2338,41 @@ function spyRpc(seen, extra) {
    * （症狀：覆寫存到不存在的鍵上、永遠不生效，而且是安靜的）。
    */
   calls.length = 0
-  const peek = collect(tree, (el) => el.props.className === 'dsh-tv-btn')[0]
-  peek.props.onClick()
+  /**
+   * ⚠️ **展開是「整條列」**（2.6.72），不再是按鈕——所以這一段按的是那一列本身。
+   *
+   * 列的 `role="button"` ＋ `aria-expanded` 是**鍵盤與讀屏器**那一半：
+   * 「整條可以按」用滑鼠做得到、用鍵盤做不到是壞的。
+   */
+  const closedRows = collect(tree, (el) => String(el.props.className).includes('dsh-tv-bookRowClick'))
+  assert.equal(closedRows.length, 3, '每一列都是可按的（整條可以摺疊）')
+  assert.deepEqual(
+    closedRows.map((one) => one.props['aria-expanded']),
+    ['false', 'false', 'false'],
+    '平時是收起來的（`aria-expanded=false`）',
+  )
+  assert.deepEqual(
+    collect(tree, (el) => String(el.props.className).includes('dsh-tv-peekArrow')).map((one) => String(one.props.children)),
+    ['▸', '▸', '▸'],
+    '每一列最左邊都有折疊箭頭（每一列都有 ⇒ 不會有「有的有、有的沒有」的左右跳動）',
+  )
+  closedRows[0].props.onClick()
   await new Promise((resolve) => setTimeout(resolve, 0))
   assert.deepEqual(
     calls.map((one) => one.op + ':' + (one.args === undefined ? '' : String(one.args.book))),
     ['worldbook.roomEntries:酒館'],
-    '按「▸ 條目」才讀那一本（而且走的是 roomEntries）',
+    '按整條列才讀那一本（而且走的是 roomEntries）',
   )
   const openedTree = renderComponent(RoomBooksPane, props)
-  const opened = collect(openedTree, (el) => el.props.className === 'dsh-tv-btn')
-  assert.equal(String(opened[0].props.children), '▾ 條目', '展開之後要變 ▾')
-  assert.equal(opened[0].props['aria-expanded'], 'true', 'aria-expanded 要跟著換')
+  const openedRows = collect(openedTree, (el) => String(el.props.className).includes('dsh-tv-bookRowClick'))
+  assert.equal(openedRows[0].props['aria-expanded'], 'true', 'aria-expanded 要跟著換')
+  assert.deepEqual(
+    collect(openedTree, (el) => String(el.props.className).includes('dsh-tv-peekArrow')).map((one) =>
+      String(one.props.className).includes('dsh-tv-peekArrowOpen'),
+    ),
+    [true, false, false],
+    '展開那一列的箭頭要轉（`transform`，不是換字——換字會讓整排左右跳）',
+  )
   const peekBody = collect(openedTree, (el) => el.props.className === 'dsh-tv-bookPeek')
   assert.equal(peekBody.length, 1, '展開的是那一本（只有一個預覽區塊）')
   assert.deepEqual(
@@ -2346,6 +2385,21 @@ function spyRpc(seen, extra) {
     ['第一條', '第二條'],
     '標題由宿主半算（`comment` 優先、退回 `name`）',
   )
+
+  /**
+   * ⑧b ⚠️ **列上的控制項要自己吃掉 click**（不然按開關會順手把這一列展開／收起）。
+   *
+   * 這一條在真瀏覽器裡才看得出來（假 React 沒有事件冒泡），所以驗的是**那個包裝層
+   * 真的存在、而且它的 `onClick` 會 `stopPropagation`**。
+   */
+  const ctls = collect(tree, (el) => String(el.props.className) === 'dsh-tv-rowCtl')
+  assert.equal(ctls.length, 6, '每一列兩個（開關 ＋ 位置選單）× 三本')
+  let stopped = 0
+  for (const one of ctls) {
+    assert.equal(typeof one.props.onClick, 'function', '包裝層要有 onClick 才有辦法攔')
+    one.props.onClick({ stopPropagation: () => { stopped += 1 } })
+  }
+  assert.equal(stopped, 6, '⚠️ 每一個控制項的包裝層都要真的 stopPropagation')
 
   /**
    * ⑨ ⚠️ **條目的優先序**（這一輪真正的功能）：展開之後每一條一格。
@@ -2431,15 +2485,33 @@ function spyRpc(seen, extra) {
   )
 
   calls.length = 0
-  opened[0].props.onClick()
+  openedRows[0].props.onClick()
   await new Promise((resolve) => setTimeout(resolve, 0))
   assert.deepEqual(calls, [], '再按一次是「收起」——不該再讀一次 rpc')
+
+  /**
+   * ⑩ ⚠️ **「✎ 修改」＝跳到 📖 藏書 打開這一本**（2.6.72 加回來的路）。
+   *
+   * ⚠️ 這一條驗的是**那條管線真的有動**：`jumpToBook` 要做三件事
+   * （交接格、分區、主面板），少一件的症状是**什麼都沒有發生**——
+   * 畫面上完全看不出來（2.6.66 實際回報過「去改它沒有跳過去」）。
+   */
+  const jumped = collect(tree, (el) => el.props.className === 'dsh-tv-btn')
+  jumped[1].props.onClick({ stopPropagation: () => {} })
+  assert.equal(exportsObject.__pendingBookOpen(), '輸出格式', '① 交接格要放進那一本的 id')
+  assert.equal(exportsObject.__takePendingBookOpen(), '輸出格式', '撿走時要回那一本')
+  assert.equal(exportsObject.__pendingBookOpen(), '', '⚠️ 撿走之後要清掉（忘了清＝下一次重畫又跳一次）')
+  assert.deepEqual(
+    calls.filter((one) => one.op === 'room.write'),
+    [],
+    '⚠️ 跳轉不是寫入（按「✎ 修改」不該動到任何設定）',
+  )
 
   exportsObject.__chat.setContext(null)
   reactImpl.resetHooks()
   exportsObject.__setZone('hall')
   console.log(
-    '4w. 房間藏書列 OK — 開關／位置（合併不誤刪）／展開後的條目優先序（灰字＝書自己的、打回就還原）、標籤排最左、內容唯讀',
+    '4w. 房間藏書列 OK — 開關／位置（合併不誤刪）／整條列展開／條目優先序（灰字＝書自己的、打回就還原）、標籤排最左、✎ 修改會跳轉、內容唯讀',
   )
 }
 
