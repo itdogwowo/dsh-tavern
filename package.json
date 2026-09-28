@@ -1,6 +1,6 @@
 {
   "name": "dsh-tavern",
-  "version": "2.6.72",
+  "version": "2.7.0",
   "description": "酒館模式：一間酒館＝一個你選的資料夾。新增時在裡面建立人物卡／世界書／對話／設定的結構，UI 只讀寫這些檔案",
   "license": "MIT",
   "author": "itdogwowo",
@@ -28,6 +28,7 @@
     "lib/render.js",
     "lib/samplers.js",
     "lib/worldbook.js",
+    "lib/workflow.js",
     "samples/characters/老闆娘.png",
     "cordis.patch.yml",
     "dsh.plugin.json",
@@ -37,7 +38,7 @@
   ],
   "scripts": {
     "verify": "node verify.mjs",
-    "test": "node verify.mjs && node test-pngcard.mjs && node test-worldbook.mjs && node test-agent.mjs && node test-preset.mjs && node test-samplers.mjs && node test-render.mjs && node smoke.mjs && node test-workspace.mjs && node test-registry.mjs && node test-client.mjs"
+    "test": "node verify.mjs && node test-pngcard.mjs && node test-worldbook.mjs && node test-agent.mjs && node test-preset.mjs && node test-samplers.mjs && node test-render.mjs && node test-workflow.mjs && node smoke.mjs && node test-workspace.mjs && node test-registry.mjs && node test-client.mjs"
   },
   "keywords": [
     "dsh",

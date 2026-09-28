@@ -27,18 +27,19 @@ DSH 有能力但沒有角色扮演的前台。這個插件是把兩邊接起來�
 
 ---
 
-## 2. 現在的狀態（2026-09-23 更新）
+## 2. 現在的狀態（2026-09-28 更新）
 
 | | |
 |---|---|
-| 版本 | **2.6.72**。2.6.46–2.6.66 已經推上 GitHub `main`（`4b4501e`）、2.6.67–2.6.71 推在 `a824a6f`；2.6.72 還在這一台 |
-| 測試 | `npm test` **十一套全綠**（`verify` / `test-pngcard` / `test-worldbook` / `test-agent` / `test-preset` / `test-samplers` / **`test-render`** / `smoke` / `test-workspace` / `test-registry` / `test-client`）|
+| 版本 | **2.7.0**（工作樓第一塊：圖的資料層。**還沒有 UI**）。2.6.46–2.6.72 都已經 commit 在這台；**push 一律要先問使用者** |
+| 測試 | `npm test` **十二套全綠**（`verify` / `test-pngcard` / `test-worldbook` / `test-agent` / `test-preset` / `test-samplers` / `test-render` / **`test-workflow`** / `smoke` / `test-workspace` / `test-registry` / `test-client`）|
 | 架構 | **三個面全部實作完成**：宿主半、瀏覽器半、**Agent 面** |
 | 規範 | 12 條（R1–R13），**每一條都有測試釘住** |
 | 真聊天 | ✅ 打通了；逐字串流、寫回 `.jsonl`、思考列、換角色換卡都實測過 |
-| 安裝 | ✅ `link:` 指回工作區（改工作區＝改插件）。**Windows 這台** |
+| 安裝 | ✅ `link:` 指回工作區（改工作區＝改插件）。**macOS 這台** |
 | UI | **五個分區**：🏠 大廳／💬 包廂／🎭 卡司／📖 藏書／**⚙️ 設定**。對話頁**五個分頁**：💬 對話／🖼️ 插圖／⚙️ 房間／**📖 藏書**（這一間房的開關、位置，與展開後的**條目優先序**）／📄 檔案 |
 | 儲存 | **一間房＝一個資料夾**（`chats/<角色>/<roomId>/{room.json,chat.jsonl,art/,files/}`），身分是 `roomId`，改名不動路徑。設計：`docs/room-layout.md` |
+| **工作樓** | ⏳ **進行中**。2.7.0 有：圖的資料層、執行器（**送訊息真的照圖跑**）、房間頁的「🕸️ 工作樓」畫布（看得到／拖得動／改得了設定）、執行紀錄（`runs/`）、**多人房間**（`room.json` 的 `cast`、一人一則的多說話者氣泡）。還沒做：試跑、run log 檢視、執行高亮、導演與工具節點。設計與分期：**`docs/workflow-plan.md`**（**要動這一塊之前先讀它**）|
 | 酒館 | 一間（使用者自己選的資料夾）|
 | 對話框 | ✅ 模型 chip（顯示名稱 ＋ 思考強度）、選單、全新的房也能選（順手開 session）、等級會收斂。**2.6.43** |
 | op 命名 | ✅ **只有 `room.*`**（`chat.*` 那六個相容 op 在 2.6.46 拆掉了）|

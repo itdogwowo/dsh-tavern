@@ -14,7 +14,7 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { readTextChunks } from './lib/pngcard.js'
 
 // 註冊表放在 DSH home；測試一律用暫存 home，才不會碰到使用者真的酒館街。
@@ -27,6 +27,9 @@ const tavern = await import('./lib/index.js')
 const calls = { effects: [], routes: [] }
 
 /** 一個夠用的假 Context（只有 webServer，v2 不需要別的服務）。 */
+const archivedSessions = []
+/** 假的「現在活著的 session」（`sessions.list()` 會回這個）。 */
+const liveSessionStubs = []
 function makeCtx() {
   return {
     logger: { info() {}, warn() {} },
@@ -37,6 +40,19 @@ function makeCtx() {
     },
     get(name) {
       if (name === 'directoryPicker') return undefined
+      // ⚠️ 只有**刪除**那一條路會用到它（把 DSH 的會話列收起來）。回一個假的，
+      //    這樣 smoke 才驗得到「解綁之後有沒有順手封存」——那正是使用者回報的
+      //    「刪掉了，但 DSH 那邊還留著一列未分組」。
+      // ⚠️ 「還在記憶體裡的 session」清單（可變）：刪檔前要問它——活著的一律只封存。
+      if (name === 'sessions') return { list: () => liveSessionStubs }
+      if (name === 'workspaceController') {
+        return {
+          archiveSession(request) {
+            archivedSessions.push(request.sessionId)
+            return Promise.resolve({ archivedSessionIds: [request.sessionId] })
+          },
+        }
+      }
       return undefined
     },
   }
@@ -823,9 +839,87 @@ function pngCard(entries) {
   })
   assert.equal(bound.ok, true, '先綁一個 session：' + bound.error)
 
+  archivedSessions.length = 0
+  // 先在這個**暫時的 DSH_HOME** 裡造出那個 session 的痕跡（真的一模一樣的形狀）。
+  const sessionDir = join(home, 'sessions', '--fake-ws--', 'session-smoke-delete-0000-1111-222233334444')
+  mkdirSync(sessionDir, { recursive: true })
+  writeFileSync(join(sessionDir, 'session.v3.jsonl.zstd'), 'x')
+  writeFileSync(join(sessionDir, 'session.lock'), '')
+  const projCacheFile = join(home, 'storages', 'session_projcache', 'sessions', 'session-smoke-delete-0000-1111-222233334444.json')
+  mkdirSync(dirname(projCacheFile), { recursive: true })
+  writeFileSync(projCacheFile, '{}')
+
+  // 先在那間房裡放一張圖與一個附件（重建不出來的那兩種東西）
+  const roomDir = join(deleteShop, 'chats', '老闆娘', made.value.room)
+  mkdirSync(join(roomDir, 'art'), { recursive: true })
+  writeFileSync(join(roomDir, 'art', '店內.png'), 'fake-image-bytes')
+  mkdirSync(join(roomDir, 'files'), { recursive: true })
+  writeFileSync(join(roomDir, 'files', '菜單.pdf'), 'fake-file-bytes')
+
   const dropped = await callRpc('room.delete', { character: '老闆娘', room: made.value.room })
   assert.equal(dropped.ok, true, 'room.delete 應該存在而且成功：' + dropped.error)
   assert.deepEqual(dropped.value.unbound, ['session-smoke-delete-0000-1111-222233334444'], '要回報解掉了哪個 session')
+  /**
+   * ⚠️ **刪掉房間＝DSH 那一列也要收起來**（使用者回報：「我剷除的時候，他沒有
+   * 順便幫我剷除 dsh 的紀錄」）。房間刪掉之後那個 session 已經沒有任何東西對應，
+   * 留在 DSH 的側邊欄就是一列「未分組」的孤兒。
+   *
+   * DSH 沒有「刪除 session」——原生選單只有「封存」（＝從清單上收起來，見
+   * `dsh-client-ui-workspace` 的 `archiveSession`），所以這裡驗的是
+   * `workspaceController.archiveSession` 真的被叫到了。
+   */
+  assert.equal(dropped.value.archived, 1, '⚠️ 解綁之後要順手把它從 DSH 的清單上收起來')
+  assert.deepEqual(archivedSessions, ['session-smoke-delete-0000-1111-222233334444'], '收起來的正是那一顆')
+
+  /**
+   * ⚠️ **封存 ≠ 刪掉**（使用者問過「封存是什麼概念」）：封存只是 DSH 從清單上收起來，
+   * **檔案還在磁碟上**。使用者選的是「封存 ＋ 真的刪檔（不可逆）」，所以這裡連
+   * `~/.dsh/sessions/<...>/<id>/` 與投影快取都驗掉。
+   */
+  assert.equal(dropped.value.purged, 1, '⚠️ 檔案要真的刪掉（不是只從清單收起來）')
+
+  /**
+   * ⚠️ **房間的圖與附件要先搬到救援資料夾再刪**（使用者回報：「原本綁定的圖片
+   * 不見了」）。圖是**重建不出來的位元組**——房間可以重建、對話可以重打，
+   * 圖沒了就沒了。而使用者看到的訊息本來就寫著「插圖留著」（舊行為的文字），
+   * 所以兩邊對齊的辦法是**讓那句話變成真的**。
+   */
+  assert.equal(Array.isArray(dropped.value.rescued), true, '要回報搬走了哪些東西')
+  assert.deepEqual(dropped.value.rescued.map((one) => one.kind).sort(), ['art', 'files'], '圖與附件都要救')
+  const rescueRoot = join(deleteShop, 'art', '_deleted')
+  const rescueDir = readdirSync(rescueRoot)[0]
+  assert.equal(
+    existsSync(join(rescueRoot, rescueDir, 'art', '店內.png')),
+    true,
+    '⚠️ 那張圖要真的躺在救援資料夾裡（不是只有回報）：' + String(rescueDir),
+  )
+  assert.equal(existsSync(join(rescueRoot, rescueDir, 'files', '菜單.pdf')), true, '附件也一樣')
+  assert.equal(dropped.value.skipped, 0)
+  assert.equal(existsSync(sessionDir), false, '⚠️ session 的資料夾要真的不在：' + sessionDir)
+  assert.equal(existsSync(projCacheFile), false, '投影快取也要刪掉')
+
+  /**
+   * ⚠️ **還活著的不刪檔**：檔案刪掉之後，一個還在記憶體裡的 session 會在下一次寫入
+   * 時又長出一個新的 `.jsonl`（只剩未來事件的空殼）。所以活著的一律只封存，
+   * 而且回報 `skipped`——使用者才不會以為「刪了但空間沒少」是 bug。
+   */
+  const liveShopRoom = await callRpc('room.create', { character: '老闆娘', name: '還開著的房' })
+  const liveId = 'session-smoke-live-0000-1111-222233334444'
+  const liveDir = join(home, 'sessions', '--fake-ws--', liveId)
+  mkdirSync(liveDir, { recursive: true })
+  writeFileSync(join(liveDir, 'session.v3.jsonl.zstd'), 'x')
+  await callRpc('session.bind', {
+    sessionId: liveId,
+    character: '老闆娘',
+    room: liveShopRoom.value.room,
+    chat: liveShopRoom.value.name,
+  })
+  liveSessionStubs.push({ id: liveId })
+  const liveGone = await callRpc('room.delete', { character: '老闆娘', room: liveShopRoom.value.room })
+  assert.equal(liveGone.value.skipped, 1, '⚠️ 還在記憶體裡的一律只封存、不刪檔')
+  assert.equal(liveGone.value.purged, 0)
+  assert.equal(existsSync(liveDir), true, '⚠️ 活著的那一個檔案要留著（不然它會長出一個空殼）')
+  liveSessionStubs.length = 0
   // ⚠️ 不是 0：新建酒館本來就附一間預設房（見 §4），所以剩下的應該正好是它。
   const leftRooms = (await callRpc('room.list', {})).value
   assert.equal(leftRooms.length, 1, '只剩新建時附的那一間預設房：' + JSON.stringify(leftRooms.map((r) => r.name)))
@@ -848,7 +942,7 @@ function pngCard(entries) {
 
   await callRpc('tavern.remove', { id: 'delete-shop' })
   rmSync(deleteShop, { recursive: true, force: true })
-  console.log('11d. 刪除對話 OK — 刪檔案、解綁定、不存在時明確報錯')
+  console.log('11d. 刪除對話 OK — 刪檔案、解綁定、封存 DSH 那一列、真的刪 session 檔（活著的只封存）')
 }
 
 /* --- 11e. 附件（訊息裡夾帶的檔案／圖片）--------------------------------- */
@@ -1216,6 +1310,172 @@ function pngCard(entries) {
   await callRpc('tavern.remove', { id: tavernId })
   rmSync(renderShop, { recursive: true, force: true })
   console.log('11h. 回覆格式 OK — 走真的 HTTP：plain 預設、物件陣列活著、壞值回報、workspace 帶得回來')
+}
+
+/* --- 11l. 工作樓（workflow）走真的 HTTP 一圈 ------------------------------ */
+{
+  /**
+   * 這一條驗的是**「預設圖＝現在的行為」那一句話在 HTTP 這一圈仍然成立**。
+   *
+   * ⚠️ 為什麼要特地繞一圈真的 route：宿主回的是**算出來的**圖（沒有綁圖的房間），
+   * 而那張圖必須
+   *   1. 帶著房主的卡 id（不然 `cast` 節點不知道要演誰）；
+   *   2. 是**合法的**（三個節點、兩條線、沒有環）；
+   *   3. **一個檔案都不寫**（讀取只讀是這個 repo 的硬規則——問一次圖就生出檔案，
+   *      是使用者按「重新整理」會看到東西一直長出來的那種 bug）。
+   */
+  const flowShop = mkdtempSync(join(tmpdir(), 'tavern-workflow-'))
+  const added = await callRpc('tavern.add', { path: flowShop })
+  const tavernId = added.value.added.id
+
+  const made = await callRpc('room.create', { id: tavernId, character: '老闆娘', name: '工作樓房' })
+  const roomId = made.value.room
+
+  // ① 沒有綁圖 ⇒ 回算出來的預設圖，而且**不落地**
+  const inferred = await callRpc('workflow.read', { id: tavernId, character: '老闆娘', room: roomId })
+  assert.equal(inferred.ok, true, 'workflow.read 應該成功：' + inferred.error)
+  assert.equal(inferred.value.source, 'default', '沒綁圖時 source 是 default')
+  assert.equal(inferred.value.dangling, false)
+  assert.deepEqual(
+    inferred.value.workflow.nodes.map((one) => one.type),
+    ['input', 'cast', 'output'],
+    '⚠️ 預設圖就是使用者說的那三個節點',
+  )
+  assert.equal(inferred.value.workflow.nodes[1].config.card, '老闆娘', 'cast 節點要帶房主的卡')
+  assert.equal(inferred.value.errors.length, 0, '預設圖一定要是合法的')
+  // ⚠️ `workflows/` 這個資料夾在「新增酒館」時就跟著其他子資料夾一起建好了
+  //    （`SUBDIRS`），所以這裡要驗的是**讀取沒有多出任何圖檔**——不是資料夾不存在。
+  const afterRead = existsSync(join(flowShop, 'workflows')) ? readdirSync(join(flowShop, 'workflows')) : []
+  assert.deepEqual(afterRead, [], '⚠️ 讀取只讀：問一次圖不可以生出任何圖檔')
+
+  // ② 寫一張圖、綁上去，再讀回來要一模一樣
+  const written = await callRpc('workflow.write', {
+    id: tavernId,
+    workflow: '',
+    graph: {
+      name: '演出',
+      nodes: [
+        { id: 'i', type: 'input', at: [40, 160] },
+        { id: 'c', type: 'cast', at: [300, 160], config: { card: '老闆娘' } },
+        { id: 'o', type: 'output', at: [560, 160] },
+      ],
+      edges: [{ from: 'i', to: 'c' }, { from: 'c', to: 'o' }],
+    },
+  })
+  assert.equal(written.ok, true, 'workflow.write 應該成功：' + written.error)
+  assert.equal(written.value.id, '演出', 'id 由名稱推導')
+  assert.equal(existsSync(join(flowShop, 'workflows', '演出.json')), true, '⚠️ 圖要住在酒館資料夾裡')
+
+  const bound = await callRpc('room.write', { id: tavernId, character: '老闆娘', room: roomId, patch: { workflow: '演出' } })
+  assert.equal(bound.value.workflow, '演出', '綁定要寫進 room.json')
+  const nowFile = await callRpc('workflow.read', { id: tavernId, character: '老闆娘', room: roomId })
+  assert.equal(nowFile.value.source, 'file', '綁了就跑那一張')
+  assert.equal(nowFile.value.workflow.name, '演出')
+
+  // ③ 清單要列得出來（工作樓那一頁用它畫卡片）
+  const listed = await callRpc('workflow.list', { id: tavernId })
+  assert.equal(listed.ok, true, 'workflow.list 應該成功：' + listed.error)
+  assert.equal(listed.value.length, 1)
+  assert.equal(listed.value[0].id, '演出')
+  assert.equal(listed.value[0].broken, false)
+  assert.deepEqual(listed.value[0].summary.cards, ['老闆娘'], '摘要要列出這張圖用到哪些卡')
+
+  // ④ 有環的圖：**存得下去**（使用者正在編輯），但要回報錯誤讓 UI 說
+  const cyclic = await callRpc('workflow.write', {
+    id: tavernId,
+    workflow: '壞掉',
+    graph: {
+      nodes: [
+        { id: 'i', type: 'input' },
+        { id: 'c', type: 'cast', config: { card: '老闆娘' } },
+        { id: 'o', type: 'output' },
+      ],
+      edges: [{ from: 'i', to: 'c' }, { from: 'c', to: 'o' }, { from: 'o', to: 'c' }],
+    },
+  })
+  assert.equal(cyclic.ok, true, '有環不是「寫入失敗」——是「寫進去了，但跑不動」')
+  assert.equal(
+    cyclic.value.errors.some((line) => String(line).includes('循環')),
+    true,
+    '要回報循環：' + JSON.stringify(cyclic.value.errors),
+  )
+
+  // ⑤ 刪掉被綁定的圖 ⇒ 退回預設並回報 dangling（**不是**整個壞掉）
+  await callRpc('workflow.delete', { id: tavernId, workflow: '演出' })
+  const after = await callRpc('workflow.read', { id: tavernId, character: '老闆娘', room: roomId })
+  assert.equal(after.value.source, 'default', '圖被刪掉就退回預設圖')
+  assert.equal(after.value.dangling, true, '⚠️ 要說「你原本用的圖不見了」')
+  assert.equal(after.value.workflow.nodes[1].config.card, '老闆娘', '退回的預設圖仍然是這一房的')
+
+  // ⑥ 多人房間：`cast` 走真的 HTTP 一圈（只收認得的卡、清單要帶成員）
+  const castBad = await callRpc('room.write', {
+    id: tavernId,
+    character: '老闆娘',
+    room: roomId,
+    patch: { cast: ['老闆娘', '不存在的人'] },
+  })
+  assert.equal(castBad.ok, true, 'room.write 應該成功：' + castBad.error)
+  assert.deepEqual(castBad.value.cast, ['老闆娘'], '⚠️ 只收認得的卡（打錯的名字不可以留下來）')
+  assert.ok(
+    Array.isArray(castBad.value.dropped) && castBad.value.dropped.some((line) => String(line).includes('不存在的人')),
+    '不認得的要回報：' + JSON.stringify(castBad.value.dropped),
+  )
+  const withCast = await callRpc('room.list', { id: tavernId, character: '老闆娘' })
+  assert.equal(withCast.ok, true, 'room.list 應該成功：' + withCast.error)
+  const row = withCast.value.filter((one) => one.room === roomId)[0]
+  assert.deepEqual(row.cast, ['老闆娘'], '⚠️ 清單要帶成員（客戶端畫那排膠囊）')
+  assert.equal(row.castDeclared, true, '而且要分得出「明確指定過」與「空＝房主」')
+  // 成員改了 → 這一房的預設圖要跟著長出兩顆角色節點
+  // ⚠️ 先真的建一張卡：`cast` **只收認得的卡**，所以沒有這張卡時它會被丢掉，
+  //    而斷言會變成「只有一顆節點」——看起來像圖畫錯了，其實是卡不存在。
+  await callRpc('character.create', { id: tavernId, name: '酒保' })
+  await callRpc('room.write', { id: tavernId, character: '老闆娘', room: roomId, patch: { cast: ['老闆娘', '酒保'] } })
+  const twoCast = await callRpc('workflow.read', { id: tavernId, character: '老闆娘', room: roomId })
+  assert.deepEqual(
+    twoCast.value.workflow.nodes.filter((one) => one.type === 'cast').map((one) => one.config.card),
+    ['老闆娘', '酒保'],
+    '⚠️ 多人房間打開工作樓＝看到「這一間房有誰」',
+  )
+  const castLayers = twoCast.value.plan.layers.filter((one) => one.length > 1)
+  assert.equal(castLayers.length, 1, '兩顆角色節點要在同一層（並聯）')
+
+  // ⑦ 執行紀錄（`runs/<runId>.jsonl`）走真的 HTTP 一圈
+  const appended = await callRpc('run.append', {
+    id: tavernId,
+    character: '老闆娘',
+    room: roomId,
+    run: 'run-1',
+    lines: [{ node: 'cast', type: 'cast', at: '2026-09-28T00:00:00.000Z', ms: 12, out: '（她抬頭）' }],
+  })
+  assert.equal(appended.ok, true, 'run.append 應該成功：' + appended.error)
+  assert.equal(appended.value.appended, 1)
+  // ⚠️ **追加而不是覆蓋**：同一個 run 分兩次送，兩行都要在——跑一半斷掉時，
+  //    已經跑完的那幾顆才算數（那是使用者最想看的那一輪）。
+  await callRpc('run.append', {
+    id: tavernId,
+    character: '老闆娘',
+    room: roomId,
+    run: 'run-1',
+    lines: [{ node: 'output', type: 'output', at: '2026-09-28T00:00:01.000Z', ms: 3, failed: false }],
+  })
+  const runs = await callRpc('run.list', { id: tavernId, character: '老闆娘', room: roomId })
+  assert.equal(runs.ok, true, 'run.list 應該成功：' + runs.error)
+  assert.equal(runs.value.length, 1)
+  assert.equal(runs.value[0].run, 'run-1')
+  assert.equal(runs.value[0].nodes, 2, '兩次追加＝兩行')
+  assert.equal(runs.value[0].ms, 15, '時間要加總（清單上要看得到這一輪花了多久）')
+  const oneRun = await callRpc('run.read', { id: tavernId, character: '老闆娘', room: roomId, run: 'run-1' })
+  assert.equal(oneRun.value.lines.length, 2)
+  assert.equal(oneRun.value.lines[0].out, '（她抬頭）', '內容要活得過 JSON 這一圈')
+  assert.equal(
+    existsSync(join(flowShop, 'chats', '老闆娘', roomId, 'runs', 'run-1.jsonl')),
+    true,
+    '⚠️ 執行紀錄住在房間資料夾裡（跟著這一間房走，不是 ~/.dsh）',
+  )
+
+  await callRpc('tavern.remove', { id: tavernId })
+  rmSync(flowShop, { recursive: true, force: true })
+  console.log('11l. 工作樓 OK — 走真的 HTTP：預設圖不落地、綁定／清單、有環照存但回報、刪圖退回預設、多人 cast、執行紀錄')
 }
 
 /* --- 11i. stop 的開關走真的 HTTP 一圈 ------------------------------------- */

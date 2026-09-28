@@ -11,6 +11,8 @@
  *   4. **agent 面**：exports["./agent"] 能 import，而且只依賴 `systemPrompt`
  *   5. **零執行期依賴**：每個面只 import node: 與自己的相對檔案（最重要的一條）
  *   6. 三個面的版本標記彼此對得上（只更新到一半是最常見的災難）
+ *   7. **不碰使用者的預設 preset**：原始碼不准出現會改到 DSH preset 名冊或
+ *      設定的寫法（見下面那一節；使用者的回報變成規則）
  *
  * 用法：node verify.mjs
  */
@@ -165,6 +167,63 @@ if (existsSync(agentPath)) {
     listed.has(`samples/characters/${DEFAULT_CHARACTER_ID}.png`),
     `samples/characters/${DEFAULT_CHARACTER_ID}.png`,
   )
+}
+
+/* --- 不可以碰「使用者的預設 preset」--------------------------------------- */
+/**
+ * 2026-09-27 使用者回報：「用過酒館之後，好像所有新開的對話都被預設成酒館模式」。
+ *
+ * 追查的結論是**插件沒有做這件事**：DSH 決定新對話 preset 的路徑只有一條
+ * （settings 的 `agent-presets.default`，沒被改過就是部署預設 `standard`），
+ * 而我們的三個面**都沒有碰過那個命名空間**——宿主半的 `inject` 只有 `webServer`
+ * （上面那一條已經釘住），所以它連 `settings` 服務都拿不到。
+ *
+ * 但「查過一次沒問題」不是保證。所以把這件事寫成規則：**只要原始碼裡出現
+ * 會改到別人預設的寫法，檢查就變紅。**（`.agent-presets/` 那個**路徑**不算，
+ * 那是我們自己那份 preset 的資料夾，見 `lib/preset.js` 的 `presetDir()`。）
+ *
+ * 不准出現的四種東西：
+ *   1. DSH settings 的命名空間名 `'agent-presets'`（引號包起來的字串）
+ *   2. DSH 的 preset 名冊服務 `agentPresets`（尤其它的 `.select()`——
+ *      那個 API 會把一個 session 的 preset 換掉）
+ *   3. DSH 的 `remote.settings`（換 preset 預設值的另一條路）
+ *   4. DSH 的設定檔名 `settings.yaml`（直接改檔案是第三條路）
+ */
+{
+  const libDir = join(root, 'lib')
+  const files = existsSync(libDir) ? readdirSync(libDir).filter((name) => name.endsWith('.js')) : []
+  const forbidden = [
+    [/['"]agent-presets['"]/, "DSH settings 命名空間 'agent-presets'"],
+    [/\bagentPresets\b/, 'DSH 的 preset 名冊服務 agentPresets'],
+    [/remote\.settings/, 'DSH 的 remote.settings'],
+    [/['"]settings\.ya?ml['"]/, 'DSH 的設定檔 settings.yaml'],
+  ]
+  const offenders = []
+  for (const name of files) {
+    const text = readFileSync(join(libDir, name), 'utf8')
+    for (const [pattern, label] of forbidden) {
+      if (pattern.test(text)) offenders.push(name + ' → ' + label)
+    }
+  }
+  check('不准碰使用者的預設 preset（settings 命名空間／名冊／設定檔）', offenders.length === 0, offenders.join(' | '))
+
+  /**
+   * `.agent-presets` 這條路徑**只准出現在 `join(..., '.agent-presets', PRESET_ID)`**。
+   *
+   * 這是上一條的另一半：我們可以（也必須）裝自己那一份 preset 到使用者的 DSH home，
+   * 但**只准碰 `dsh-tavern` 那一個資料夾**。哪天有人寫成掃描整個 `.agent-presets/`
+   * 或去動別人的 preset，這一條會先紅。
+   */
+  const pathOffenders = []
+  for (const name of files) {
+    const text = readFileSync(join(libDir, name), 'utf8')
+    for (const match of text.matchAll(/['"]\.agent-presets['"][^\n]{0,60}/g)) {
+      if (/^['"]\.agent-presets['"]\s*,\s*PRESET_ID\s*\)/.test(match[0]) === false) {
+        pathOffenders.push(name + ' → ' + match[0].trim())
+      }
+    }
+  }
+  check("`.agent-presets` 只用在「我們自己那一份」（join 進 PRESET_ID）", pathOffenders.length === 0, pathOffenders.join(' | '))
 }
 
 /* --- 版本標記：確認裝到的是這一版 ---------------------------------------- */

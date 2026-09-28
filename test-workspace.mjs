@@ -11,7 +11,16 @@ import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { SUBDIRS, TavernWorkspace, requireId, resolveDshHome, segmentFromName, unwrapCard } from './lib/workspace.js'
+import {
+  SUBDIRS,
+  TavernWorkspace,
+  requireId,
+  resolveDshHome,
+  segmentFromName,
+  toCardEnvelope,
+  unwrapCard,
+} from './lib/workspace.js'
+import { DEFAULT_CHARACTER_ID } from './lib/defaults.js'
 import { DEFAULT_MARKERS } from './lib/render.js'
 import { isPng, readCardFromPng } from './lib/pngcard.js'
 import {
@@ -1636,8 +1645,9 @@ try {
     //    ——那比不做事更糟，因為它讓「有沒有做事」失去意義。
     assert.equal(
       upgradeFormatBook(JSON.stringify(up), shipped),
-      null,
-      '⚠️ 已經是最新版 ⇒ 回 null（＝不必寫檔、也不必回報更新）',
+      'same',
+      "⚠️ 已經是最新版 ⇒ 回 `'same'`（＝不必寫檔，而且**不可以用 `null`**——" +
+        '`null` 是「你改過它」，兩件事混在一起就會說謊）',
     )
 
     // ⑧ `repairDefaults()` 走真的檔案：沒有檔案時建、建完再跑一次說「沒有東西要補」。
@@ -1648,6 +1658,16 @@ try {
     assert.ok(existsSync(join(root, 'repair-shop', 'worldbooks', '輸出格式.json')), '檔案要真的落地')
     const secondRun = await ws7.repairDefaults()
     assert.deepEqual(secondRun.changed, [], '⚠️ 第二次沒有東西要補（**不可以假裝做了事**）')
+    /**
+     * ⚠️ **第二次不可以說「你改過它」**（2026-09-27 修）。
+     *
+     * 以前 `upgradeFormatBook` 用 `null` 同時代表「你改過它」與「已經是最新版」，
+     * 於是**剛建好的酒館**按「🧩 補上／更新預設內容」會被回報成
+     * 「worldbooks/輸出格式.json（你改過它，所以原樣保留）」——而他什麼都沒改。
+     * 說謊的訊息比不做事更糟：它讓「有沒有做事」這件事失去意義。
+     */
+    assert.deepEqual(secondRun.skipped, [], '⚠️ 沒改過就不可以說「你改過它」')
+    assert.equal(secondRun.unchanged, true, '要說「已經是最新的」（`unchanged`）')
     // 改了它之後再跑 ⇒ 進 `skipped`（保留），不是 `changed`。
     const path2 = join(root, 'repair-shop', 'worldbooks', '輸出格式.json')
     const mine = JSON.parse(await readFile(path2, 'utf8'))
@@ -1657,7 +1677,72 @@ try {
     assert.deepEqual(third.changed, [], '⚠️ 改過之後不可以再改它')
     assert.equal(third.skipped.length, 1, '而且要說「你改過它，原樣保留」：' + JSON.stringify(third.skipped))
 
-    console.log('20. 預設升級 OK — 沒改過才升級、改一個字就不動、幂等、壞檔不丟錯')
+    // ⑨ **舊酒館的預設角色卡**：只有 JSON、沒有圖 ⇒ 換成出貨的 PNG 卡（2.7.0）。
+    //    使用者回報的正是這個：「老闆娘應該是有一張預設的 PNG 的」。
+    const ws8 = new TavernWorkspace(join(root, 'old-card-shop'))
+    await ws8.seed()
+    const pngPath = join(root, 'old-card-shop', 'characters', `${DEFAULT_CHARACTER_ID}.png`)
+    const jsonPath = join(root, 'old-card-shop', 'characters', `${DEFAULT_CHARACTER_ID}.json`)
+    assert.equal(existsSync(pngPath), true, 'seed() 寫的預設卡是 PNG')
+    // 把它換成「早期版本寫的那種純 JSON」（內容一模一樣，只是沒有圖）
+    const { readCardFromPng } = await import('./lib/pngcard.js')
+    const shippedCard = unwrapCard(readCardFromPng(await readFile(pngPath)).card)
+    await writeFile(jsonPath, JSON.stringify(toCardEnvelope(shippedCard), null, 2))
+    await rm(pngPath)
+    const cardRepair = await ws8.repairDefaults()
+    assert.equal(existsSync(pngPath), true, '⚠️ 沒改過的預設卡要換回有圖的 PNG')
+    assert.equal(existsSync(jsonPath), false, '⚠️ `.json` 一定要刪掉（`cardFileOf` 是 `.json` 優先）')
+    assert.ok(
+      cardRepair.changed.some((one) => one.includes('png')),
+      '要回報換了卡：' + JSON.stringify(cardRepair.changed),
+    )
+
+    /**
+     * ⚠️ **舊版的出廠卡也要認得**（2026-09-27，使用者回報的正是這個）：
+     *
+     * 出廠那張卡改過兩次（2.6.44 補上「她的長相」那段文字 ＋ 連圖），所以舊酒館裡的
+     * 出廠卡**一定不會**與現在的出貨卡逐字相同。嚴格比對的結果是
+     * **每一間舊酒館都永遠沒有臉**——所以要放寬成：
+     *   1. 除了 `description` 以外，五個核心欄位一字不差
+     *   2. `description` 還留著出廠註記（「（這是一張預設卡片——…」）
+     */
+    await rm(pngPath)
+    const oldDefault = { ...shippedCard }
+    delete oldDefault.nickname
+    delete oldDefault.creator
+    delete oldDefault.character_version
+    delete oldDefault.extensions
+    delete oldDefault.assets
+    delete oldDefault.group_only_greetings
+    oldDefault.description = oldDefault.description.replace(
+      /藍色的長髮[\s\S]*?把話題換掉。\n\n/,
+      '',
+    )
+    assert.notEqual(oldDefault.description, shippedCard.description, '這一張是「舊版出廠卡」')
+    await writeFile(jsonPath, JSON.stringify(toCardEnvelope(oldDefault), null, 2))
+    const oldRepair = await ws8.repairDefaults()
+    assert.equal(existsSync(pngPath), true, '⚠️ 舊版的出廠卡要換成有圖的 PNG（不然它永遠沒有臉）')
+    assert.equal(existsSync(jsonPath), false, '.json 要刪掉')
+
+    // 但**註記被刪掉**（＝他改寫了這個角色）⇒ 不動
+    await rm(pngPath, { force: true })
+    const rewritten = { ...oldDefault, description: '她是我自己寫的老闆娘。' }
+    await writeFile(jsonPath, JSON.stringify(toCardEnvelope(rewritten), null, 2))
+    const rewrittenRepair = await ws8.repairDefaults()
+    assert.equal(existsSync(pngPath), false, '⚠️ 出廠註記不在了 ⇒ 那是他的角色，不可以蓋掉')
+
+    // 使用者**改過**那張卡 ⇒ 完全不動（那是他的角色，我們給不了他自己的圖）
+    await rm(pngPath, { force: true })
+    const mineCard = { ...shippedCard, name: '我的老闆娘' }
+    await writeFile(jsonPath, JSON.stringify(toCardEnvelope(mineCard), null, 2))
+    const keptCard = await ws8.repairDefaults()
+    assert.equal(existsSync(pngPath), false, '⚠️ 改過的卡不可以被換掉')
+    assert.ok(
+      keptCard.skipped.some((one) => one.includes('characters/')),
+      '而且要說「你改過它，原樣保留」：' + JSON.stringify(keptCard.skipped),
+    )
+
+    console.log('20. 預設升級 OK — 沒改過才升級、改一個字就不動、幂等、壞檔不丟錯、舊卡換回 PNG')
   }
 
   /* --- 21. 世界書位置的**房間那一層**（2.6.62）--------------------------- */

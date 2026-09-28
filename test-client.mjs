@@ -4208,6 +4208,362 @@ function spyRpc(seen, extra) {
   console.log('9. 送訊息 OK — 逐字串流、requestId、失敗時有可行動的訊息')
 }
 
+/* ------------------------- 工作樓執行器（節點圖） --------------------------- */
+
+{
+  /**
+   * 這一塊是「多人房間 ＋ 工作樓」的心臟。它的正確性幾乎全部在**順序**與
+   * **失敗時的行為**上——而這兩件事在畫面上長得一模一樣（有字，或沒字），
+   * 所以一定要直接餵一張圖給它跑。
+   *
+   * 驗四件事：
+   *   1. 預設圖（input → cast → output）跑起來＝**現在的送訊息**（兩則一起寫）。
+   *   2. 同一層的節點**同時**跑（並聯）；層與層之間**一定**等。
+   *   3. 一顆節點失敗**不中斷整輪**，而且下游拿到的是空的（不是壞掉）。
+   *   4. 每一顆節點都留下一行執行紀錄（私有輸出要有地方住）。
+   */
+  const { __workflow, __chat, __setRpc } = exportsObject
+
+  assert.equal(typeof __workflow.runTurn, 'function', '要有執行器')
+  assert.equal(__workflow.castPrompt({ config: {} }, '哈囉'), '哈囉', '沒有模板＝原樣送出')
+  assert.equal(
+    __workflow.castPrompt({ config: { prompt: '先想，再回答。\n{{input}}' } }, '哈囉'),
+    '先想，再回答。\n哈囉',
+    '有 {{input}} 就換掉它',
+  )
+  assert.equal(
+    __workflow.castPrompt({ config: { prompt: '（用三句話寫你的心理狀態）' } }, '哈囉'),
+    '（用三句話寫你的心理狀態）\n\n哈囉',
+    '沒有 {{input}} 就接在前面（兩種行為，不要第三種）',
+  )
+  assert.equal(
+    __workflow.upstream({ from: ['b', 'a'] }, { a: 'A', b: 'B' }, 'INPUT'),
+    'B\n\nA',
+    '⚠️ 上游照 from 的順序接（那是使用者拉線的順序）',
+  )
+  assert.equal(__workflow.upstream({ from: [] }, {}, 'INPUT'), 'INPUT', '沒有上游時退回這一輪的使用者輸入')
+  // ⚠️ **有上游、但上游是空的** ≠ 沒有上游。這一條踩過：兩種都退回使用者輸入的話，
+  //    一次角色失敗會讓 output **把你說的那句話當成角色的回覆寫進紀錄**。
+  assert.equal(__workflow.upstream({ from: ['a'] }, { a: '' }, 'INPUT'), '', '有上游但是空的⇒空字串，不要退回去')
+  assert.ok(__workflow.mintRunId().startsWith('run-'), '紀錄 id 要看得出是我們的')
+
+  /** 一個假的對話服務：每次 prompt 回一段固定的字，並且可以延後完成。 */
+  const makeService = (reply, delayMs) => {
+    const prompts = []
+    const service = {
+      create: () => Promise.resolve({ ok: true, value: { sessionId: 's' } }),
+      follow: () => ({
+        [Symbol.asyncIterator]: () => {
+          let sent = false
+          return {
+            next: () => {
+              if (sent) return Promise.resolve({ done: true, value: undefined })
+              sent = true
+              return Promise.resolve({
+                done: false,
+                value: {
+                  type: 'assistant-stream',
+                  frame: { type: 'chunk', chunk: { type: 'text-delta', text: reply(prompts.length) } },
+                },
+              })
+            },
+          }
+        },
+      }),
+      prompt: (request) => {
+        prompts.push(request)
+        if (delayMs > 0) return new Promise((resolve) => setTimeout(() => resolve({ ok: true, value: {} }), delayMs))
+        return Promise.resolve({ ok: true, value: {} })
+      },
+      cancel: () => Promise.resolve({ ok: true, value: {} }),
+    }
+    return { service, prompts }
+  }
+
+  // ── ① 預設圖：使用者輸入 → 角色 → 輸出 ──
+  {
+    const { service, prompts } = makeService(() => '自己看板子。', 0)
+    __chat.setContext({ get: () => service })
+    const rpcCalls = []
+    __setRpc((op, args) => {
+      rpcCalls.push({ op, args })
+      if (op === 'preset.ensure') return Promise.resolve({})
+      if (op === 'session.list') return Promise.resolve([])
+      if (op === 'session.bind') return Promise.resolve({})
+      if (op === 'run.append') return Promise.resolve({ appended: 1 })
+      if (op === 'room.append') return Promise.resolve(2)
+      return Promise.resolve({})
+    })
+
+    const nodes = []
+    const result = await __workflow.runTurn(
+      {
+        ok: true,
+        layers: [
+          [{ id: 'input', type: 'input', config: {}, from: [] }],
+          [{ id: 'cast', type: 'cast', config: { card: '老闆娘' }, from: ['input'] }],
+          [{ id: 'output', type: 'output', config: {}, from: ['cast'] }],
+        ],
+      },
+      {
+        tavernId: 'tavern-1',
+        character: '老闆娘',
+        room: 'room-1',
+        name: '初次見面',
+        root: '/tavern',
+        input: '今天有什麼酒？',
+        media: [],
+        runId: 'run-test-1',
+        onNode: (event) => nodes.push(event),
+      },
+    )
+
+    assert.equal(result.text, '自己看板子。', '輸出節點的內容要回報給呼叫端')
+    assert.equal(result.nodes, 3)
+    assert.equal(result.failed, 0)
+    assert.equal(result.runId, 'run-test-1')
+    assert.equal(prompts.length, 1, '只有角色節點會送出 prompt（輸入與輸出不會）')
+    assert.equal(prompts[0].content[0].text, '今天有什麼酒？', '角色節點收到的就是使用者說的話')
+
+    // ⚠️ 寫入對話的形狀要跟「現在的送訊息」**一字不差**：兩則一起寫、或都不寫。
+    const appendCalls = rpcCalls.filter((one) => one.op === 'room.append')
+    assert.equal(appendCalls.length, 1, '⚠️ 兩則訊息要一起寫（跟現在的送訊息同一種行為）')
+    assert.deepEqual(
+      appendCalls[0].args.messages.map((one) => [one.name, one.isUser, one.text]),
+      [
+        ['你', true, '今天有什麼酒？'],
+        ['老闆娘', false, '自己看板子。'],
+      ],
+      '使用者那一則 ＋ 角色那一則，名字要對',
+    )
+
+    // 執行紀錄：一顆節點一行（input／cast／output 都要）
+    const logLines = rpcCalls.filter((one) => one.op === 'run.append').map((one) => one.args.lines[0])
+    assert.deepEqual(
+      logLines.map((one) => one.node),
+      ['input', 'cast', 'output'],
+      '每一顆節點都要留下一行（私有輸出要有地方住）',
+    )
+    assert.equal(logLines[1].out, '自己看板子。', '紀錄要留著那一顆的輸出')
+    assert.equal(logLines[1].card, '老闆娘', '角色節點要記下是哪一張卡')
+    assert.equal(typeof logLines[1].ms, 'number', '要記下花了多久（「變慢了」要有解釋）')
+    assert.deepEqual(
+      nodes.map((one) => one.id),
+      ['input', 'cast', 'output'],
+      'UI 的高亮要照順序收到事件',
+    )
+    assert.equal(nodes[2].total, 3, '事件要帶「一共幾顆」（進度條用）')
+
+    console.log('9b. 工作樓執行器 OK — 預設圖跑起來＝現在的送訊息（兩則一起寫、逐節點留紀錄）')
+  }
+
+  // ── ② 並聯：同一層一起跑，層與層之間要等 ──
+  {
+    const { service, prompts } = makeService((index) => (index === 0 ? 'A 的想法' : 'B 的想法'), 12)
+    __chat.setContext({ get: () => service })
+    __setRpc((op) => {
+      if (op === 'session.list') return Promise.resolve([])
+      return Promise.resolve({})
+    })
+
+    const order = []
+    const started = Date.now()
+    await __workflow.runTurn(
+      {
+        ok: true,
+        layers: [
+          [{ id: 'i', type: 'input', config: {}, from: [] }],
+          [
+            { id: 'a', type: 'cast', config: { card: 'A' }, from: ['i'] },
+            { id: 'b', type: 'cast', config: { card: 'B' }, from: ['i'] },
+          ],
+          [{ id: 'o', type: 'output', config: {}, from: ['a', 'b'] }],
+        ],
+      },
+      {
+        tavernId: 't',
+        character: 'A',
+        room: 'r',
+        name: 'r',
+        root: '/t',
+        input: '開場',
+        runId: 'run-test-2',
+        onNode: (event) => order.push(event.id),
+      },
+    )
+    const elapsed = Date.now() - started
+
+    assert.equal(prompts.length, 2, '兩個角色節點各送一次')
+    // ⚠️ 兩個 12ms 的節點如果**同時**跑，總時間會遠小於 24ms；串起來跑就會超過。
+    assert.ok(elapsed < 24, `同一層要並聯（實際 ${String(elapsed)}ms，串起來會 ≥24ms）`)
+    assert.deepEqual(order, ['i', 'a', 'b', 'o'], '順序：輸入 → 兩個角色（同層）→ 輸出')
+
+    console.log('9c. 工作樓並聯 OK — 同層的兩顆節點同時跑（' + String(elapsed) + 'ms < 24ms）')
+  }
+
+  // ── ③ 一顆節點失敗：不中斷整輪，下游拿到空的 ──
+  {
+    const logged = []
+    __chat.setContext(null) // 沒有對話服務 → 角色節點一定失敗
+    __setRpc((op, args) => {
+      if (op === 'run.append') logged.push(args.lines[0])
+      return Promise.resolve({})
+    })
+
+    const events = []
+    const result = await __workflow.runTurn(
+      {
+        ok: true,
+        layers: [
+          [{ id: 'i', type: 'input', config: {}, from: [] }],
+          [{ id: 'c', type: 'cast', config: { card: 'A' }, from: ['i'] }],
+          [{ id: 'o', type: 'output', config: {}, from: ['c'] }],
+        ],
+      },
+      {
+        tavernId: 't',
+        character: 'A',
+        room: 'r',
+        name: 'r',
+        root: '/t',
+        input: '喂',
+        runId: 'run-test-3',
+        onNode: (event) => events.push(event),
+      },
+    )
+
+    assert.equal(result.failed, 2, '角色節點失敗，而輸出節點因為沒有東西可寫也算失敗')
+    assert.equal(events[1].ok, false, '失敗要回報（畫面要說得出是哪一顆壞了）')
+    assert.ok(events[1].detail.includes('沒有對話服務'), '要帶可行動的原因：' + events[1].detail)
+    assert.equal(result.text, '', '最後沒有文字（呼叫端才知道要顯示錯誤）')
+    const castLine = logged.find((one) => one.node === 'c')
+    assert.equal(castLine.failed, true, '失敗也要留一行紀錄（那一輪通常正是使用者最想看的）')
+    assert.equal(logged.length, 3, '⚠️ 失敗不中斷：三顆節點都要留下紀錄')
+
+    console.log('9d. 工作樓失敗 OK — 一顆壞掉不中斷整輪、下游拿到空的、紀錄照留')
+  }
+
+  // ── ④ 這一房要跑的圖：快取與降級 ──
+  {
+    const reads = []
+    const plan = { ok: true, layers: [[{ id: 'i', type: 'input', config: {}, from: [] }]] }
+    __setRpc((op, args) => {
+      if (op === 'workflow.read') {
+        reads.push(args)
+        return Promise.resolve({ source: 'default', plan: plan, workflow: { nodes: [], edges: [] } })
+      }
+      return Promise.resolve({})
+    })
+    __workflow.clearPlan()
+
+    const first = await __workflow.ensurePlan('t1', 'A', 'r1')
+    const second = await __workflow.ensurePlan('t1', 'A', 'r1')
+    assert.equal(reads.length, 1, '⚠️ 同一間房只讀一次（不然每一則訊息都多一趟 RPC）')
+    assert.equal(first, second, '兩次拿到同一份（快取）')
+    assert.equal(first.plan.ok, true)
+
+    await __workflow.ensurePlan('t1', 'A', 'r2')
+    assert.equal(reads.length, 2, '不同的房要各自讀')
+
+    // 改完圖一定要清掉，不然「我明明改了，它跑的还是舊的」
+    __workflow.clearPlan('t1', 'A', 'r1')
+    await __workflow.ensurePlan('t1', 'A', 'r1')
+    assert.equal(reads.length, 3, '清掉之後要重讀')
+
+    // 壞掉的圖 → null（呼叫端退回直接那一條路）
+    __setRpc((op) => {
+      if (op === 'workflow.read') return Promise.resolve({ plan: { ok: false, layers: [], error: '有循環' } })
+      return Promise.resolve({})
+    })
+    __workflow.clearPlan()
+    assert.equal(await __workflow.ensurePlan('t2', 'A', 'r1'), null, '圖跑不動＝null（降級，不是丟錯）')
+    // 舊宿主半沒有這個 op → 也回 null（不能讓人不能聊天）
+    __setRpc(() => Promise.reject(new Error('unknown op')))
+    __workflow.clearPlan()
+    assert.equal(await __workflow.ensurePlan('t3', 'A', 'r1'), null, '讀不到圖也要能繼續聊天')
+
+    console.log('9e. 工作樓計畫快取 OK — 同房只讀一次、清掉要重讀、壞圖／舊宿主降級成直接那條路')
+  }
+
+  // ── ⑤ 多人房間：兩個角色並聯 → 輸出**一人一則** ──
+  {
+    /**
+     * ⚠️ 這一條驗的是「多人聊天室」看起來像不像多人：`output` 節點要把**每一個
+     * 有話說的上游各寫一則**（`chat.jsonl` 的每一則本來就帶 `name`）。
+     * 接成一則的話，三個角色講的話會擠在同一個泡泡裡、頭像只有一個人。
+     */
+    const { service, prompts } = makeService((index) => (index === 0 ? 'A 說的話' : 'B 說的話'), 0)
+    __chat.setContext({ get: () => service })
+    const rpcCalls = []
+    __setRpc((op, args) => {
+      rpcCalls.push({ op, args })
+      if (op === 'session.list') return Promise.resolve([])
+      return Promise.resolve({})
+    })
+
+    const result = await __workflow.runTurn(
+      {
+        ok: true,
+        layers: [
+          [{ id: 'i', type: 'input', config: {}, from: [] }],
+          [
+            { id: 'cast', type: 'cast', config: { card: '酒保' }, from: ['i'] },
+            { id: 'cast-2', type: 'cast', config: { card: '常客' }, from: ['i'] },
+          ],
+          [{ id: 'o', type: 'output', config: {}, from: ['cast', 'cast-2'] }],
+        ],
+      },
+      {
+        tavernId: 't',
+        character: '老闆娘',
+        room: 'r',
+        name: '群聊房',
+        root: '/t',
+        input: '大家早',
+        runId: 'run-many',
+      },
+    )
+
+    assert.equal(prompts.length, 2, '兩個角色各送一次（並聯）')
+    assert.equal(result.messages.length, 2, '⚠️ 一人一則（不是接成一則）')
+    assert.deepEqual(
+      result.messages.map((one) => one.name).sort(),
+      ['常客', '酒保'],
+      '每一則要掛**說話的那個人**的名字',
+    )
+    assert.deepEqual(
+      result.messages.map((one) => one.text).sort(),
+      ['A 說的話', 'B 說的話'],
+      '兩段話都要在，而且沒有被互相蓋掉',
+    )
+    const append = rpcCalls.filter((one) => one.op === 'room.append')
+    assert.equal(append.length, 1, '兩則一起寫（一次 room.append）')
+    assert.deepEqual(
+      append[0].args.messages.map((one) => one.isUser),
+      [true, false, false],
+      '使用者那一則 ＋ 兩個角色各一則',
+    )
+    assert.equal(append[0].args.messages[0].name, '你')
+    assert.equal(
+      append[0].args.messages.filter((one) => one.isUser === false).length,
+      2,
+      '⚠️ 兩則角色訊息：這是「多說話者氣泡」的來源',
+    )
+    // 執行紀錄：兩顆角色節點各一行（各自的名字，看得出是誰在什麼時候說的）
+    const logged = rpcCalls.filter((one) => one.op === 'run.append').map((one) => one.args.lines[0])
+    assert.deepEqual(
+      logged.filter((one) => one.type === 'cast').map((one) => one.card).sort(),
+      ['常客', '酒保'],
+      '紀錄要分別記下每一顆角色節點是誰',
+    )
+
+    console.log('9f. 多人房間 OK — 兩個角色並聯、一人一則、名字各歸各的')
+  }
+
+  __chat.setContext(null)
+  __setRpc(null)
+}
+
 /* ------------------- 思考列（reasoning）：DSH 也有那一列 ------------------- */
 
 {
@@ -4387,8 +4743,8 @@ function spyRpc(seen, extra) {
     )
     assert.deepEqual(
       tabs.map((one) => one.props.children),
-      ['💬 對話', '🖼️ 插圖', '⚙️ 房間', '📖 藏書', '📄 檔案'],
-      '對話頁要有五個分頁（跟分區列同一組樣式）——📖 藏書 是這一間房自己的（2.6.64）',
+      ['💬 對話', '🖼️ 插圖', '⚙️ 房間', '📖 藏書', '🕸️ 工作樓', '📄 檔案'],
+      '對話頁要有六個分頁（跟分區列同一組樣式）——📖 藏書 與 🕸️ 工作樓 都是這一間房自己的',
     )
     assert.match(tabs[0].props.className, /dsh-tv-zoneOn/, '預設要停在「對話」')
 
@@ -4422,8 +4778,438 @@ function spyRpc(seen, extra) {
     exportsObject.__setChatTab('chat')
     exportsObject.__selectChat(null)
     reactImpl.resetHooks()
-    console.log('14c. 對話頁分頁 OK — 三個分頁、一次只畫一個、預設停在對話')
+    console.log('14c. 對話頁分頁 OK — 六個分頁、一次只畫一個、預設停在對話')
   }
+
+/* ------------------ 工作樓畫布（房間頁的「🕸️ 工作樓」） ------------------ */
+
+{
+  /**
+   * ⚠️ 這一節**直接渲染 `RoomWorkflowPane`**，不繞對話頁：
+   *   1. 它自己的資料來自 `props.rpc`，直接餵一個假的就好（不必動 `__setRpc`）；
+   *   2. 繞對話頁的話，`renderChat()` 的那一層會影響「哪一次 render 才真的畫到它」，
+   *      而那個不確定性會讓斷言驗到「還沒載入」的畫面——**那看起來很像成功**。
+   */
+  const { RoomWorkflowPane, TavernChatPage: ChatPage } = exportsObject.__components
+  assert.equal(typeof RoomWorkflowPane, 'function', '工作樓那一頁要匯出給測試')
+
+  const graph = {
+    version: 1,
+    id: '',
+    name: '夜晚：預設工作樓',
+    nodes: [
+      { id: 'input', type: 'input', at: [40, 160], config: {} },
+      { id: 'cast', type: 'cast', at: [300, 160], config: { card: '老闆娘' } },
+      { id: 'output', type: 'output', at: [560, 160], config: {} },
+    ],
+    edges: [
+      { from: 'input', to: 'cast' },
+      { from: 'cast', to: 'output' },
+    ],
+  }
+  const calls = []
+  const fakeRpc = (op, args) => {
+    calls.push({ op, args })
+    if (op === 'workflow.read') {
+      return Promise.resolve({
+        source: 'default',
+        id: '',
+        dangling: false,
+        errors: [],
+        warnings: [],
+        workflow: graph,
+        // ⚠️ 宿主半**一定會回計畫**（`planRun`）——假的回應也要有，不然
+        //    `ensureRoomPlan` 會把它當成「跑不動的圖」而快取成 null，
+        //    於是下面那條「存檔要清快取」的斷言會驗到一個假的通過。
+        plan: {
+          ok: true,
+          error: '',
+          layers: [
+            [{ id: 'input', type: 'input', config: {}, from: [] }],
+            [{ id: 'cast', type: 'cast', config: { card: '老闆娘' }, from: ['input'] }],
+            [{ id: 'output', type: 'output', config: {}, from: ['cast'] }],
+          ],
+        },
+      })
+    }
+    if (op === 'workflow.write') return Promise.resolve({ id: '夜晚', workflow: { ...graph, id: '夜晚' }, errors: [], warnings: [] })
+    if (op === 'room.write') return Promise.resolve({ workflow: '夜晚' })
+    return Promise.resolve({})
+  }
+  const selected = { character: '老闆娘', room: 'm1k3x9-a7f2', name: '夜晚' }
+  const props = { rpc: fakeRpc, selected: selected, tavernId: 'tavern-1', characters: [{ id: '老闆娘' }, { id: '酒保' }] }
+  const draw = () => renderComponent(RoomWorkflowPane, props)
+  /**
+   * ⚠️ 這一頁用 `props.rpc`（好驗），但 `ensureRoomPlan` 走的是**模組層級**那一支
+   * ——兩邊都要換成同一個假的，不然「清快取」那一條會驗到一個假的通過
+   * （模組層級那支還在回上一個測試留下的 `{}`，於是圖被當成跑不動的、快取成 null）。
+   */
+  exportsObject.__setRpc(fakeRpc)
+
+  reactImpl.resetHooks()
+  draw()
+  await exportsObject.__loadRoomWorkflow()
+  const tree = draw()
+
+  // ── 節點與線 ──
+  const cards = collect(tree, (el) => String(el.props.className || '').indexOf('dsh-tv-flowNode') === 0)
+  assert.equal(cards.length, 3, '預設圖就是三顆節點（使用者輸入 → 角色 → 輸出）')
+  const wires = collect(tree, (el) => String(el.props.className || '') === 'dsh-tv-flowWire')
+  assert.equal(wires.length, 2, '兩條線：輸入→角色、角色→輸出')
+  assert.match(wires[0].props.d, /^M 260 197 C /, '線要從「輸入」的右緣連到「角色」的左緣：' + wires[0].props.d)
+  const text = flatten(tree)
+  assert.ok(text.includes('老闆娘'), '角色節點要顯示它選了哪一張卡：' + text.slice(0, 160))
+  assert.ok(text.includes('把你說的話原樣送給這個角色'), '沒有指令模板時要說清楚行為')
+
+  // ── 點一顆節點 → 右邊出現它的設定 ──
+  cards[1].props.children[0].props.onPointerDown({ clientX: 500, clientY: 500 })
+  const picked = collect(draw(), (el) => String(el.props.className || '').indexOf('dsh-tv-flowNode') === 0)
+  assert.match(picked[1].props.className, /dsh-tv-flowNodeOn/, '點到的節點要亮起來')
+  assert.ok(flatten(draw()).includes('指令模板（可空）'), '角色節點的設定要有指令模板那一格')
+
+  // ── 拖曳：只有被拖的那一顆會動，而且照位移量搬 ──
+  const before = collect(draw(), (el) => String(el.props.className || '').indexOf('dsh-tv-flowNode') === 0)
+  const beforeIn = before[0].props.style.left + ',' + before[0].props.style.top
+  const canvas = collect(draw(), (el) => String(el.props.className || '') === 'dsh-tv-flowCanvas')[0]
+  canvas.props.onPointerMove({ clientX: 530, clientY: 520 })
+  const after = collect(draw(), (el) => String(el.props.className || '').indexOf('dsh-tv-flowNode') === 0)
+  assert.equal(after[1].props.style.left, '330px', '拖曳要照位移量搬動那一顆（500→530＝+30）')
+  assert.equal(after[1].props.style.top, '180px', '垂直方向同理（+20）')
+  assert.equal(
+    after[0].props.style.left + ',' + after[0].props.style.top,
+    beforeIn,
+    '⚠️ 只有被拖的那一顆會動（別顆跟著跑＝座標算錯）',
+  )
+  canvas.props.onPointerUp({})
+
+  // ── 儲存：整份寫入 ＋ 綁到這一間房 ＋ **清掉執行計畫的快取** ──
+  const saveBtn = collect(draw(), (el) => el.type === 'button' && el.props.children === '儲存')[0]
+  assert.ok(saveBtn !== undefined, '要有儲存鍵')
+  exportsObject.__workflow.clearPlan()
+  await exportsObject.__workflow.ensurePlan('tavern-1', '老闆娘', 'm1k3x9-a7f2')  // 先讓快取裡有東西
+  const readsBefore = calls.filter((one) => one.op === 'workflow.read').length
+  saveBtn.props.onClick()
+  await new Promise((resolve) => setImmediate(resolve))
+  const wrote = calls.filter((one) => one.op === 'workflow.write')
+  assert.equal(wrote.length, 1, '要真的寫檔')
+  assert.equal(wrote[0].args.workflow, '', '第一次存＝還沒有 id（由名稱推導）')
+  assert.equal(wrote[0].args.graph.nodes[1].at[0], 330, '⚠️ 存下去的是**拖過的位置**')
+  const bound = calls.filter((one) => one.op === 'room.write')
+  assert.equal(bound.length, 1, '要綁到這一間房（room.json 的 workflow）')
+  assert.equal(bound[0].args.patch.workflow, '夜晚')
+  // ⚠️ 存完一定要清快取：不清的話使用者回對話頁送訊息，跑的還是舊的那一張。
+  const afterClear = await exportsObject.__workflow.ensurePlan('tavern-1', '老闆娘', 'm1k3x9-a7f2')
+  const readsAfter = calls.filter((one) => one.op === 'workflow.read').length
+  assert.equal(
+    readsAfter,
+    readsBefore + 1,
+    '存檔要清掉執行計畫的快取（不然會跑到舊的圖）：readsBefore=' +
+      String(readsBefore) + ' readsAfter=' + String(readsAfter) + ' plan=' + String(afterClear !== null),
+  )
+
+  reactImpl.resetHooks()
+  console.log('14m. 工作樓畫布 OK — 三顆節點兩條線、點選與拖曳、存檔會綁房間並清快取')
+}
+
+/* --------------------- 工作樓：拉線、加節點、刪節點 --------------------- */
+
+{
+  /**
+   * 「用線來將一個一個角色串聯／並聯起來」——這一節驗的就是那件事。
+   *
+   * ⚠️ 三種「不給接」一定要**各有各的訊息**（安靜地不接＝使用者以為自己沒拉到，
+   * 然後一直重試）：自己接自己、接去「使用者輸入」、從「輸出」拉出來、
+   * 接過了、以及**會造出循環**。
+   *
+   * ⚠️ 圖的兩端（輸入／輸出）**沒有刪除鍵**：刪掉就沒有人知道這一輪從哪裡開始、
+   * 結果要寫去哪裡，而使用者也沒有辦法把它加回來。
+   */
+  const { RoomWorkflowPane } = exportsObject.__components
+
+  const graph = {
+    version: 1,
+    id: 'g1',
+    name: '測試圖',
+    nodes: [
+      { id: 'input', type: 'input', at: [40, 160], config: {} },
+      { id: 'cast', type: 'cast', at: [300, 80], config: { card: '老闆娘' } },
+      { id: 'cast-2', type: 'cast', at: [300, 240], config: { card: '酒保' } },
+      { id: 'output', type: 'output', at: [560, 160], config: {} },
+    ],
+    edges: [
+      { from: 'input', to: 'cast' },
+      { from: 'input', to: 'cast-2' },
+      { from: 'cast', to: 'output' },
+      { from: 'cast-2', to: 'output' },
+    ],
+  }
+  const writes = []
+  const fakeRpc = (op, args) => {
+    if (op === 'workflow.read') {
+      return Promise.resolve({
+        source: 'file', id: 'g1', dangling: false, errors: [], warnings: [], workflow: graph,
+        plan: { ok: true, error: '', layers: [] },
+      })
+    }
+    if (op === 'workflow.write') {
+      writes.push(args)
+      return Promise.resolve({ id: 'g1', workflow: Object.assign({}, args.graph, { id: 'g1' }), errors: [], warnings: [] })
+    }
+    return Promise.resolve({})
+  }
+  const props = {
+    rpc: fakeRpc,
+    selected: { character: '老闆娘', room: 'r1', name: '夜晚' },
+    tavernId: 't1',
+    characters: [{ id: '老闆娘' }, { id: '酒保' }],
+  }
+  const draw = () => renderComponent(RoomWorkflowPane, props)
+  const nodeEl = (tree, id) =>
+    collect(tree, (el) => String(el.props.className || '').indexOf('dsh-tv-flowNode') === 0 && el.props['data-node'] === id)[0]
+  const port = (tree, id, dir) =>
+    collect(tree, (el) => String(el.props.className || '').indexOf('dsh-tv-flowPort') === 0 && el.props[dir === 'out' ? 'data-out' : 'data-in'] === id)[0]
+  const edgesOf = (tree) => {
+    const paths = collect(tree, (el) => String(el.props.className || '') === 'dsh-tv-flowWireHit')
+    return paths.map((one) => one.props['data-wire'])
+  }
+
+  exportsObject.__setRpc(fakeRpc)
+  reactImpl.resetHooks()
+  draw()
+  await exportsObject.__loadRoomWorkflow()
+  let tree = draw()
+
+  assert.deepEqual(
+    edgesOf(tree).sort(),
+    ['cast-2→output', 'cast→output', 'input→cast', 'input→cast-2'],
+    '一開始四條線',
+  )
+
+  // ── 串聯：把 cast 的輸出接到 cast-2（第二個角色看得到第一個講的話）──
+  port(tree, 'cast', 'out').props.onPointerDown({ clientX: 100, clientY: 100, stopPropagation() {} })
+  tree = draw()
+  assert.equal(flatten(tree).includes('記得按「儲存」'), false, '還在拉，什麼都還沒改')
+  port(tree, 'cast-2', 'in').props.onPointerUp({ stopPropagation() {} })
+  tree = draw()
+  assert.ok(edgesOf(tree).includes('cast→cast-2'), '要接得起來：' + JSON.stringify(edgesOf(tree)))
+  assert.ok(flatten(tree).includes('記得按「儲存」'), '接完要提醒還沒存檔')
+
+  // ── 五種「不給接」──
+  const refuse = (from, to, expected) => {
+    const before = edgesOf(tree).length
+    port(tree, from, 'out').props.onPointerDown({ clientX: 10, clientY: 10, stopPropagation() {} })
+    port(draw(), to, 'in').props.onPointerUp({ stopPropagation() {} })
+    tree = draw()
+    assert.ok(
+      flatten(tree).includes(expected),
+      `「${from}→${to}」要擋下來並說「${expected}」：` + JSON.stringify(flatten(tree).slice(0, 30)),
+    )
+    // ⚠️ 不可以用「那條線不在」來驗：`input→cast` 本來就在（重複接的那一種），
+    //    所以真正的判斷是**圖有沒有變**。
+    assert.equal(edgesOf(tree).length, before, `「${from}→${to}」擋下來＝圖一個字都沒變`)
+  }
+  refuse('cast-2', 'cast', '這一條線會繞回自己')
+  refuse('cast', 'input', '「使用者輸入」是圖的起點')
+  refuse('output', 'cast', '「輸出」是圖的終點')
+  refuse('input', 'cast', '這兩顆已經接過了')
+
+  // ── 剪線：點那一條線 ──
+  const hit = collect(tree, (el) => el.props['data-wire'] === 'cast-2→output')[0]
+  hit.props.onClick({ stopPropagation() {} })
+  tree = draw()
+  assert.equal(edgesOf(tree).includes('cast-2→output'), false, '點線＝剪掉它')
+  assert.ok(edgesOf(tree).includes('cast→cast-2'), '別的線不受影響')
+
+  // ── 右邊清單也可以剪（線很細，那裡是確定的入口）──
+  nodeEl(tree, 'cast-2').props.children[0].props.onPointerDown({ clientX: 0, clientY: 0 })
+  tree = draw()
+  const cutBtn = collect(tree, (el) => el.type === 'button' && el.props['aria-label'] === '剪掉 cast 到這一顆的線')[0]
+  assert.ok(cutBtn !== undefined, '右邊要有「上游」清單：' + JSON.stringify(flatten(tree).slice(0, 30)))
+  cutBtn.props.onClick()
+  tree = draw()
+  assert.equal(edgesOf(tree).includes('cast→cast-2'), false, '清單上的 ✕ 也可以剪')
+
+  // ── 加節點 ──
+  const addBtn = collect(tree, (el) => el.type === 'button' && flatten(el).includes('＋ 角色節點'))[0]
+  assert.ok(addBtn !== undefined, '要有「＋ 角色節點」')
+  addBtn.props.onClick()
+  tree = draw()
+  const ids = collect(tree, (el) => el.props['data-node'] !== undefined).map((one) => one.props['data-node'])
+  // ⚠️ 不比**順序**：新節點是 push 到陣列尾巴的（畫面上是絕對定位，順序不影響
+  //    任何事），而順序會讓這一條變成在驗實作細節。
+  assert.deepEqual(ids.slice().sort(), ['cast', 'cast-2', 'cast-3', 'input', 'output'], '新節點要接在既有的後面命名')
+
+  // ── 刪節點：圖的兩端沒有 ✕，角色節點有，而且會帶走它的線 ──
+  const dels = (one) => collect(one, (el) => String(el.props.className || '') === 'dsh-tv-flowDel')
+  assert.equal(dels(nodeEl(tree, 'cast-3')).length, 1, '角色節點要能刪')
+  assert.equal(dels(nodeEl(tree, 'input')).length, 0, '⚠️ 圖的起點不能刪')
+  assert.equal(dels(nodeEl(tree, 'output')).length, 0, '⚠️ 圖的終點不能刪')
+  dels(nodeEl(tree, 'cast-2'))[0].props.onClick({ stopPropagation() {} })
+  tree = draw()
+  assert.equal(collect(tree, (el) => el.props['data-node'] !== undefined).length, 4, '刪掉一顆')
+  assert.deepEqual(
+    edgesOf(tree).filter((one) => one.indexOf('cast-2') >= 0),
+    [],
+    '⚠️ 接在它身上的線要一起消失（留著就是接不到的線）',
+  )
+
+  // ── 新加的那一顆也要接得起來（不然「加節點」只完成一半）──
+  port(tree, 'input', 'out').props.onPointerDown({ clientX: 5, clientY: 5, stopPropagation() {} })
+  port(draw(), 'cast-3', 'in').props.onPointerUp({ stopPropagation() {} })
+  tree = draw()
+  port(tree, 'cast-3', 'out').props.onPointerDown({ clientX: 5, clientY: 5, stopPropagation() {} })
+  port(draw(), 'output', 'in').props.onPointerUp({ stopPropagation() {} })
+  tree = draw()
+  assert.ok(edgesOf(tree).includes('input→cast-3'), '新節點要接得上（上游）')
+  assert.ok(edgesOf(tree).includes('cast-3→output'), '新節點要接得上（下游）')
+
+  // ── 存檔：拉過的東西要進 workflow.write ──
+  // ⚠️ 要在**剛剛那次 draw() 的那棵樹**上找按鈕：按鈕的 `onClick` 抓的是那一次
+  //    渲染的 `state`（同一個 ref），但 `flatten(el).includes('儲存')` 這種找法
+  //    需要那棵樹還在手上。
+  const saveBtn = collect(tree, (el) => el.type === 'button' && flatten(el).includes('儲存'))[0]
+  assert.ok(saveBtn !== undefined, '要有儲存鍵')
+  saveBtn.props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(writes.length, 1, '存一次：' + JSON.stringify(flatten(draw()).slice(0, 20)))
+  // ⚠️ `writes` 存的是**參數本身**（`writes.push(args)`），不是 `{op, args}`。
+  const savedEdges = writes[0].graph.edges.map((one) => one.from + '→' + one.to)
+  assert.deepEqual(
+    savedEdges.slice().sort(),
+    ['cast-3→output', 'cast→output', 'input→cast', 'input→cast-3'],
+    '存下去的是改過的圖：' + JSON.stringify(savedEdges),
+  )
+  assert.equal(
+    writes[0].graph.nodes.filter((one) => one.id === 'cast-2').length,
+    0,
+    '刪掉的節點不可以留在存檔裡',
+  )
+
+  reactImpl.resetHooks()
+  console.log('14o. 工作樓拉線 OK — 串聯接得起來、五種不給接各有訊息、剪線兩個入口、加／刪節點、存檔正確')
+}
+
+/* ------------- 送出訊息走的是工作樓那一條路（端到端，2026-09-27 的 bug） ------------- */
+
+{
+  /**
+   * ⚠️ 這一節是**為了抓到一個真的 bug** 才寫的：
+   *
+   *   `submit()` 裡 `var planned = ensureRoomPlan(...)` 拿到的是**Promise**，
+   *   而第一版把它當成值用（`planned.plan` → `undefined`、`planned === null`
+   *   → 永遠 false）。於是每一輪都去跑一張**不存在的圖**（0 層）→ 拋錯 →
+   *   **使用者的訊息被吞掉，什麼都沒有**。
+   *
+   *   既有的測試驗不到它：9b–9f 直接呼叫執行器、9e 直接呼叫 `ensureRoomPlan`
+   *   ——**沒有一條走過 `submit()`**。這一節就是把那一條線接起來驗。
+   */
+  const { __setRpc, __selectChat, __setChatTab, __chat } = exportsObject
+  const { TavernChatPage: ChatPage } = exportsObject.__components
+
+  const seen = []
+  __setRpc((op, args) => {
+    seen.push({ op, args })
+    if (op === 'workflow.read') {
+      return Promise.resolve({
+        source: 'default', id: '', dangling: false, errors: [], warnings: [],
+        workflow: {
+          version: 1, id: '', name: 'g',
+          nodes: [
+            { id: 'input', type: 'input', at: [40, 160], config: {} },
+            { id: 'cast', type: 'cast', at: [300, 160], config: { card: '老闆娘' } },
+            { id: 'output', type: 'output', at: [560, 160], config: {} },
+          ],
+          edges: [{ from: 'input', to: 'cast' }, { from: 'cast', to: 'output' }],
+        },
+        plan: {
+          ok: true, error: '',
+          layers: [
+            [{ id: 'input', type: 'input', config: {}, from: [] }],
+            [{ id: 'cast', type: 'cast', config: { card: '老闆娘' }, from: ['input'] }],
+            [{ id: 'output', type: 'output', config: {}, from: ['cast'] }],
+          ],
+        },
+      })
+    }
+    if (op === 'session.list') return Promise.resolve([])
+    return Promise.resolve({})
+  })
+
+  const prompts = []
+  __chat.setContext({
+    get: () => ({
+      create: () => Promise.resolve({ ok: true, value: { sessionId: 's1' } }),
+      follow: () => ({
+        [Symbol.asyncIterator]: () => {
+          let sent = false
+          return {
+            next: () => {
+              if (sent) return Promise.resolve({ done: true, value: undefined })
+              sent = true
+              return Promise.resolve({
+                done: false,
+                value: { type: 'assistant-stream', frame: { type: 'chunk', chunk: { type: 'text-delta', text: '歡迎光臨。' } } },
+              })
+            },
+          }
+        },
+      }),
+      prompt: (request) => {
+        prompts.push(request)
+        return Promise.resolve({ ok: true, value: {} })
+      },
+      cancel: () => Promise.resolve({ ok: true, value: {} }),
+    }),
+  })
+
+  // ⚠️ 這一頁要有「酒館資料夾」才送得出去（`tavernRoot()` 讀 `summary.root`），
+  //    不然 `submit()` 會在第一步就停下來（錯誤訊息是「還不知道這間酒館的資料夾」）。
+  exportsObject.__testSeed.loaded = true
+  exportsObject.__testSeed.activeId = 'tavern-1'
+  exportsObject.__testSeed.summary = { root: '/tavern', name: 't', counts: {}, files: [], layout: [] }
+  exportsObject.__testSeed.characters = [{ id: '老闆娘' }]
+  __selectChat({ character: '老闆娘', room: 'r1', name: '夜晚', file: 'r1/chat.jsonl' })
+  __setChatTab('chat')
+  reactImpl.resetHooks()
+  exportsObject.__workflow.clearPlan()
+  let tree = renderComponent(ChatPage, {})
+  const box = collect(tree, (el) => el.type === 'textarea' && el.props['aria-label'] === '訊息')[0]
+  assert.ok(box !== undefined, '要有輸入框')
+  box.props.onChange({ target: { value: '  今天有什麼酒？  ' } })
+  tree = renderComponent(ChatPage, {})
+  const send = collect(tree, (el) => el.type === 'button' && el.props['aria-label'] === '送出')[0]
+  assert.ok(send !== undefined, '要有送出鍵')
+  send.props.onClick()
+  // 送出是**好幾層 promise**（ensureChatSession → 附件 → planned → 執行器 → 寫入），
+  // 所以這裡要多等幾輪 microtask，不能只等一個 tick。
+  for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setImmediate(resolve))
+
+  assert.equal(prompts.length, 1, '⚠️ 角色節點要真的送出一次 prompt（不是跑一張空圖）')
+  assert.equal(prompts[0].content[0].text, '今天有什麼酒？', '送出的要是使用者那句話（去過空白）')
+  const appends = seen.filter((one) => one.op === 'room.append')
+  assert.equal(appends.length, 1, '⚠️ 要寫回對話紀錄（不然訊息就「被吞了」）：' + JSON.stringify(seen.map((one) => one.op)))
+  assert.deepEqual(
+    appends[0].args.messages.map((one) => [one.name, one.isUser, one.text]),
+    [
+      ['你', true, '今天有什麼酒？'],
+      ['老闆娘', false, '歡迎光臨。'],
+    ],
+    '使用者那一則 ＋ 角色的回覆',
+  )
+  const logged = seen.filter((one) => one.op === 'run.append')
+  assert.equal(logged.length, 3, '三顆節點各留一行執行紀錄')
+  const after = renderComponent(ChatPage, {})
+  assert.equal(
+    flatten(after).includes('工作樓跑完了'),
+    false,
+    '⚠️ 不可以出現「工作樓跑完了但沒有文字」那個錯誤（那正是被吞掉的症狀）',
+  )
+
+  __chat.setContext(null)
+  __selectChat(null)
+  reactImpl.resetHooks()
+  console.log('14p. 送出訊息 OK — 端到端走工作樓：真的送 prompt、兩則一起寫、三行紀錄、沒有錯誤')
+}
 
   /* ---------- 匯出：瀏覽器半自己接 `ccv3` 區塊 ---------- */
 
@@ -4747,6 +5533,28 @@ function spyRpc(seen, extra) {
     (one) => one.includes('var(--dsh-tv-radius') === false && radiusAllow.includes(one) === false,
   )
   assert.deepEqual(radius, [], '圓角只能走 var(--dsh-tv-radius-*)：' + radius.join(', '))
+
+  /**
+   * ⚠️ **`.dsh-tv-view` 不可以是絕對定位**（2026-09-27 在真的瀏覽器上量到的）。
+   *
+   * DSH 給面板內容的那一層 Slot wrapper 是 **`display:contents`**，而更外層的
+   * `pI_x6G_centerCol` 是 `position:static` 的 flex 直行——所以酒館的 view
+   * **就是** centerCol 的直屬 flex 項目。一旦寫成 `position:absolute;inset:0`，
+   * 最近的**可定位**祖先會變成 `pI_x6G_frame`（整個視窗），於是酒館的畫面撐滿
+   * 1200px、**蓋住左邊 280px 的側邊欄**。
+   *
+   * 使用者看到的是「側邊欄不見了／其他插件的位置被蓋住」。這一條把它釘住。
+   */
+  const viewRule = /\.dsh-tv-view\{([^}]*)\}/.exec(codeSource)
+  assert.ok(viewRule !== null, '要有 `.dsh-tv-view` 這一條規則')
+  assert.ok(viewRule[1].includes('position:relative'), '⚠️ `.dsh-tv-view` 要是 `position:relative`：' + viewRule[1])
+  assert.equal(
+    viewRule[1].includes('position:absolute'),
+    false,
+    '⚠️ `.dsh-tv-view` 不可以絕對定位（最近的可定位祖先是整個 frame，會蓋住側邊欄）',
+  )
+
+  console.log('17b. 主面板定位 OK — 不可以用絕對定位（會蓋住側邊欄，2026-09-27 實測）')
 
   // 套用：宿主送來的預設 ＋ 這間酒館的覆寫
   applyTheme(null, darkDefaults, lightDefaults)
@@ -5121,6 +5929,102 @@ function spyRpc(seen, extra) {
   __selectChat(null)
   reactImpl.resetHooks()
   console.log('14f. 房間內改名 OK — 用房間 id 送、只換名字（其他欄位不被清掉）、這一頁不會被重置')
+}
+
+/* ------------- 這一間房有誰（2.7.0 的多人房間：成員列與加入／移除） ------------- */
+
+{
+  /**
+   * 成員就是工作樓預設圖裡的角色節點（一人一顆、並聯）。這一條驗三件事：
+   *   1. 清單畫得出來，而且**房主看得出來**（他是這一間房掛著的資料夾）；
+   *   2. 加入／移除都送 `room.write { cast }`，並且**改完要清掉執行計畫的快取**
+   *      （不清的話「我加了人，但它還是只有房主在講話」）；
+   *   3. 只剩一個人時**不給移除**（一間沒有人講話的房沒有意義）。
+   */
+  const { __setRpc, __selectChat, __setChatTab, __currentChat } = exportsObject
+  const { TavernChatPage: ChatPage } = exportsObject.__components
+
+  const seen = []
+  __setRpc((op, args) => {
+    seen.push({ op, args })
+    if (op === 'room.write') {
+      // 照宿主半 `writeRoom` 的回應形狀：整份 room.json 的內容（含正規化後的 cast）
+      return Promise.resolve({ character: args.character, room: args.room, cast: args.patch.cast, name: '夜晚' })
+    }
+    return Promise.resolve({})
+  })
+  // 讓 `state.characters` 有東西可以選（加入成員那一格）。`__testSeed` 是一個
+  // **物件**（逐欄餵），不是函式。
+  exportsObject.__testSeed.loaded = true
+  exportsObject.__testSeed.characters = [{ id: '老闆娘' }, { id: '酒保' }, { id: '常客' }]
+
+  const room = {
+    character: '老闆娘',
+    room: 'm1k3x9-a7f2',
+    name: '夜晚',
+    file: 'm1k3x9-a7f2/chat.jsonl',
+    cast: ['老闆娘', '酒保'],
+    castDeclared: true,
+  }
+  const renderRoom = () => {
+    __setChatTab('room')
+    return renderComponent(ChatPage, {})
+  }
+  // ⚠️ 用**完整字**比對，不要用 `indexOf('dsh-tv-member') === 0`：外層容器叫
+  //    `dsh-tv-members`，前綴一模一樣——那樣會多算一個（而且看起來像「多了一個成員」）。
+  const chips = (tree) =>
+    collect(tree, (el) => /^dsh-tv-member( |$)/.test(String(el.props.className || '')))
+  const removeButtons = (tree) => collect(tree, (el) => String(el.props.className || '') === 'dsh-tv-memberX')
+
+  __selectChat(room)
+  reactImpl.resetHooks()
+  let pane = renderRoom()
+  assert.ok(flatten(pane).includes('這一間房有誰'), '要有那一格')
+  const list = chips(pane).filter((el) => String(el.props.className).indexOf('dsh-tv-memberX') < 0)
+  assert.equal(list.length, 2, '兩個成員')
+  assert.match(list[0].props.className, /dsh-tv-memberOwner/, '房主要看得出來（accent 邊）')
+  assert.equal(removeButtons(pane).length, 2, '兩個都可以移除（還有別人）')
+
+  // 加入第三個人
+  const picker = collect(pane, (el) => el.type === 'select' && el.props['aria-label'] === '加入成員')[0]
+  assert.ok(picker !== undefined, '要有「加入成員」的選單')
+  assert.deepEqual(
+    picker.props.children.slice(1).map((one) => one.props.value),
+    ['常客'],
+    '⚠️ 已經在房裡的人不該再出現在選單裡（不然會加出重複的）',
+  )
+  picker.props.onChange({ target: { value: '常客' } })
+  pane = renderRoom()
+  const addBtn = collect(pane, (el) => el.type === 'button' && flatten(el).includes('加入'))[0]
+  addBtn.props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const writes = seen.filter((one) => one.op === 'room.write')
+  assert.equal(writes.length, 1, '加入＝一次 room.write')
+  assert.deepEqual(writes[0].args.patch.cast, ['老闆娘', '酒保', '常客'], '要送完整的成員清單')
+  assert.equal(__currentChat().cast.length, 3, '畫面上的座標要跟著更新')
+
+  // 移除一個人（回到兩個人）
+  pane = renderRoom()
+  removeButtons(pane)[2].props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual(
+    seen.filter((one) => one.op === 'room.write')[1].args.patch.cast,
+    ['老闆娘', '酒保'],
+    '移除要送剩下的名單',
+  )
+
+  // ⚠️ 只剩房主一個人時：不可以再移除。
+  //    換一間房（**不同的 room id**）——同一間房改 `cast` 不會觸發那一頁的重置，
+  //    而「半途改到一半的成員不跟著換房」正是上面那條 `chat.members = undefined` 在管的。
+  __selectChat({ character: '老闆娘', room: 'solo-room', name: '一個人', cast: ['老闆娘'], castDeclared: false })
+  pane = renderRoom()
+  assert.equal(removeButtons(pane).length, 0, '最後一個人不能移除（一間沒有人講話的房沒有意義）')
+  assert.ok(flatten(pane).includes('這一間房有誰'))
+
+  __setChatTab('chat')
+  __selectChat(null)
+  reactImpl.resetHooks()
+  console.log('14n. 多人房間 OK — 成員列（房主看得出來）、加入／移除送 room.write、最後一個不能移除')
 }
 
 /* ------------------- 對話頁的用量列（使用者：「對話框太簡陋」）------------------- */
