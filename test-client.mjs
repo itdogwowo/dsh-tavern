@@ -436,7 +436,7 @@ const fakeCtx = {
 const pending = []
 
 // 真實系統裡這些座位在插件掛載前就宣告好了。
-for (const key of ['sidebar.workspaces', 'sidebar.footer.action', 'main', 'settings.plugin.item']) {
+for (const key of ['sidebar.workspaces', 'sidebar.footer.action', 'main', 'settings.plugin.item', 'sidebar.panellist']) {
   declaredSlots.add(key)
   slotEntries.set(key, [])
 }
@@ -464,10 +464,33 @@ exportsObject.apply(fakeCtx)
 const seats = injections.map((item) => `${item.options.name}:${item.options.id ?? item.options.key ?? '(single)'}`).sort()
 assert.deepEqual(
   seats,
-  ['dsh-tavern.workspaces.flow:(single)', 'main:tavern', 'main:tavern-chats', 'settings.plugin.item:tavern', 'sidebar.workspaces:(single)'],
+  [
+    'dsh-tavern.workspaces.flow:(single)',
+    'main:tavern',
+    'main:tavern-chats',
+    'settings.plugin.item:tavern',
+    'sidebar.panellist:tavern',
+    'sidebar.workspaces:(single)',
+  ],
   '座位清單',
 )
 assert.deepEqual([...registerCount.entries()].filter(([, n]) => n > 1), [], '不該重複註冊')
+
+// 側邊欄那顆入口燈籠：id 一定要對到 `main` 的 key，否則按下去選不到我們的面板
+// （`sidebar.panellist` 的契約是「一個 id 對一個 main 面板」，兩邊走散就靜靜地沒反應）。
+{
+  const entry = injections.find((item) => item.options.name === 'sidebar.panellist')
+  assert.ok(entry !== undefined, '側邊欄要有酒館入口')
+  assert.equal(entry.options.id, 'tavern', '入口 id 要等於 main:tavern 的 key')
+  assert.equal(entry.options.label, '酒館', '入口要有標籤（側邊欄拿它當 aria／提示）')
+
+  // 尺寸由側邊欄給（`SidebarPanelIconOwnerProps.size`）——寫死 16 在收合的側邊欄裡會歪。
+  const icon = entry.component({ size: 24, active: false })
+  assert.equal(icon.type, 'svg', '入口畫的是 svg')
+  assert.equal(icon.props.width, 24, '圖示要照側邊欄給的尺寸')
+  assert.equal(icon.props.height, 24, '圖示要照側邊欄給的尺寸（高）')
+  assert.equal(entry.component({ size: 16 }).props.width, 16, '沒指定尺寸時側邊欄給的就是 16')
+}
 const seatsDone = requests.length
 console.log('2. apply OK —', seats.length, '個座位')
 
@@ -6986,9 +7009,16 @@ for (const record of injections) {
     reactImpl.resetHooks()
     const element = renderComponent(record.component, props)
     assert.ok(element !== null && element !== undefined, '回傳了空值')
-    const text = flatten(element)
-    assert.ok(text.trim().length > 0, '渲染出來是空的')
-    console.log(`   ✅ ${label} — 文字 ${text.trim().length} 字`)
+    if (record.options.name === 'sidebar.panellist') {
+      // 側邊欄的入口只畫圖示：按鈕、標籤、aria 都歸側邊欄（`label` 是註冊時給的），
+      // 所以這裡沒有文字可以量——驗 svg 就好。
+      assert.equal(element.type, 'svg', '入口要畫 svg 圖示')
+      console.log(`   ✅ ${label} — 圖示`)
+    } else {
+      const text = flatten(element)
+      assert.ok(text.trim().length > 0, '渲染出來是空的')
+      console.log(`   ✅ ${label} — 文字 ${text.trim().length} 字`)
+    }
   } catch (error) {
     failures += 1
     console.log(`   ❌ ${label}：${String(error && error.message ? error.message : error)}`)

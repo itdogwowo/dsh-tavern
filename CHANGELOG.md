@@ -2,6 +2,41 @@
 
 版本號照 [Semantic Versioning](https://semver.org/lang/zh-TW/)。
 
+## 2.7.1 — 側邊欄入口（「裝好了卻什麼都看不到」）
+
+使用者：
+
+> 現在我應該是有安裝的但好像不生效。
+
+### 症狀與真正的病灶
+
+外掛**裝好了**：profile 的 bundle 清單裡有它、`sidebar.workspaces` 座位上甚至有我們
+的住戶。但側邊欄裡什麼都沒有。座位快照長這樣：
+
+| 座位 | 住戶 | priority | active |
+|---|---|---|---|
+| `sidebar.workspaces`（single） | `dsh-tavern` | **-1** | ❌ |
+| `sidebar.workspaces`（single） | 原生工作區瀏覽器 | 0 | ✅ |
+
+`sidebar.workspaces` 是 **single** 座位，酒館街用 `priority: -1` 去「接管」它——
+**-1 輸給原生的 0**，那一筆只被標成 `active: false`，畫面靜靜地不變。
+沒有錯誤、沒有日誌，客戶端也確實載入了：**「有註冊」不等於「看得到」**。
+
+而這版以前又刻意把另一個入口（`sidebar.panellist` 的那顆燈籠）拿掉了，
+理由是「酒館街就是入口」——於是兩邊同時成立時，外掛就變成了一個沒有門的房子。
+
+### 這一版做了什麼
+
+| | |
+|---|---|
+| **側邊欄入口**（`lib/client.js`） | 註冊 `sidebar.panellist`：`id: 'tavern'` ＋ `label: '酒館'`，一個 id 對一個 `main` key，按下去就是 `main:tavern` |
+| 為什麼是 list 座位 | `sidebar.panellist` 是 **list**：加進去就好、不會蓋掉別人（原生那兩顆 `plugins` / `schedules` 照舊），跟 `sidebar.workspaces` 的「接管」是兩件事 |
+| `IconLantern` 吃 `size` | 側邊欄那顆按鈕的尺寸是**側邊欄給的**（`SidebarPanelIconOwnerProps.size`）；寫死 16 在收合／展開的側邊欄裡會歪。酒館街的列不傳，維持 16 |
+| 測試 | `test-client.mjs`：座位清單加 `sidebar.panellist:tavern`、驗 id 對得上 `main:tavern`、驗圖示照 `size` 畫；逐個元件的試渲染對「只畫圖示的座位」改成驗 svg（它本來就沒有文字可量） |
+
+> 酒館街那條接管路線**沒有動**：它現在仍然是 inactive，側邊欄的工作區區塊維持原生。
+> 要讓酒館街真的出現，得改 priority（風險是整個側邊欄都要我們自己畫）——那是另一個決定。
+
 ## 2.7.0 — 工作樓（圖的資料層 ＋ 執行器：送訊息真的走這張圖了）
 
 使用者：

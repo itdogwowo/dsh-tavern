@@ -1134,10 +1134,14 @@ curl.exe -s -X POST -H "Content-Type: application/json" -H "Origin: http://127.0
 
 ### 7.6 UI 之前可以先決定的小事
 
-- `sidebar.panellist` 能不能取代我們現在**包下整個側邊欄**的做法？
-  （現在是 `sidebar.workspaces` ＋ `priority: -1`，是這個插件最有侵略性的一件事。
-  研究說 `sidebar.panellist` 是「加進去就好、不會蓋掉別人」的座位，而且沒有住戶。）
-  **這會改變外觀（酒館街不再是原生清單下面那一排），所以要使用者決定。**
+- ~~`sidebar.panellist` 能不能取代我們現在**包下整個側邊欄**的做法？~~
+  ✅ **2.7.1 已加**（不是取代，是補上入口）：`sidebar.panellist` ＋ `id: 'tavern'`
+  ＋ `main:tavern`，側邊欄最上面那一排多一顆燈籠。原因是實測發現接管那條路
+  **根本沒生效**：`sidebar.workspaces` 是 single 座位，我們 `priority: -1`、
+  原生 `0`，座位快照上我們是 `active: false`——**有註冊，畫面卻什麼都沒有**，
+  而舊版又刻意把 panellist 那顆拿掉了，於是外掛變成沒有門的房子。
+  酒館街那條接管路線**原封不動**（仍是 inactive）；要不要真的搶下 single 座位
+  （改 priority，代價是整個側邊欄要我們自己畫）**還沒決定**。
 - **對話列已經照原生會話列重做**（2026-09-18，2.5.1）：`slot → title → time → actions`
   四個部分齊全、hover 時時間讓位給 ⋯、⋯ 開一個 portal 到 `document.body` 的選單
   （**改名／分支／刪除**，原生是「改名／分支／封存」——封存沒有對應的酒館概念）。
