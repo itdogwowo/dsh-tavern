@@ -436,13 +436,25 @@ const fakeCtx = {
 const pending = []
 
 // 真實系統裡這些座位在插件掛載前就宣告好了。
-for (const key of ['sidebar.workspaces', 'sidebar.footer.action', 'main', 'settings.plugin.item', 'sidebar.panellist']) {
+for (const key of ['sidebar.workspaces', 'sidebar.footer.action', 'main', 'settings.plugin.item', 'sidebar.panellist', 'plugins.tab']) {
   declaredSlots.add(key)
   slotEntries.set(key, [])
 }
 // 原生工作區那一筆（我們要轉呼叫它）。
 function FakeWorkspaceBrowser(props) {
-  return reactImpl.createElement('div', null, '工作區原始內容')
+  // 真實的 `WorkspaceBrowser` 就是這樣：header 一次，然後每一條 session 列
+  // 都會呼叫那四個行內座位。這裡照樣打一次，才有辦法釘住「接管後不會被退位」。
+  const renderSlot = typeof props.renderSlot === 'function' ? props.renderSlot : () => null
+  return reactImpl.createElement(
+    'div',
+    null,
+    '工作區原始內容',
+    renderSlot('sidebar.workspaces.directoryFlow', {}),
+    renderSlot('sidebar.workspaces.session.row.action', { sessionId: 's1', displayTitle: 'x' }),
+    renderSlot('sidebar.session.row.leading', {}),
+    renderSlot('sidebar.session.row.trailing', {}),
+    renderSlot('sidebar.session.row.hover', {}),
+  )
 }
 const fakeInject = () => ({ hooks: { hostInfo: () => ({ home: 'x' }) } })
 slotEntries.get('sidebar.workspaces').push({
@@ -459,18 +471,41 @@ slotEntries.set('sidebar.workspaces.directoryFlow', [
   { options: { name: 'sidebar.workspaces.directoryFlow' }, component: FakeFlow, inject: () => ({}) },
 ])
 
+// 原生工作區**另外四個**子座位：每一條 session 列都會呼叫它們（2.7.1 只鏡射
+// directoryFlow，於是第一條列一畫、接管那一筆就被 SlotOwnershipError 退位）。
+function makeFakeRowSlot(label) {
+  return function FakeRowSlot() {
+    return reactImpl.createElement('span', null, label)
+  }
+}
+const ROW_SLOT_SEEDS = [
+  ['sidebar.workspaces.session.row.action', 'rowAction', '列動作'],
+  ['sidebar.session.row.leading', 'rowLeading', '列前'],
+  ['sidebar.session.row.trailing', 'rowTrailing', '列後'],
+  ['sidebar.session.row.hover', 'rowHover', '列懸停'],
+]
+for (const [seat, id, label] of ROW_SLOT_SEEDS) {
+  slotEntries.set(seat, [
+    {
+      options: { name: seat, id: 'fake-' + id, order: 7 },
+      component: makeFakeRowSlot(label),
+      inject: () => ({}),
+    },
+  ])
+}
+
 exportsObject.apply(fakeCtx)
 
 const seats = injections.map((item) => `${item.options.name}:${item.options.id ?? item.options.key ?? '(single)'}`).sort()
 assert.deepEqual(
   seats,
   [
-    'dsh-tavern.workspaces.flow:(single)',
     'main:tavern',
     'main:tavern-chats',
+    'main:tavern-street',
+    'plugins.tab:tavern-street',
     'settings.plugin.item:tavern',
-    'sidebar.panellist:tavern',
-    'sidebar.workspaces:(single)',
+    'sidebar.panellist:tavern-street',
   ],
   '座位清單',
 )
@@ -481,7 +516,7 @@ assert.deepEqual([...registerCount.entries()].filter(([, n]) => n > 1), [], '不
 {
   const entry = injections.find((item) => item.options.name === 'sidebar.panellist')
   assert.ok(entry !== undefined, '側邊欄要有酒館入口')
-  assert.equal(entry.options.id, 'tavern', '入口 id 要等於 main:tavern 的 key')
+  assert.equal(entry.options.id, 'tavern-street', '入口 id 要等於 main:tavern-street 的 key')
   assert.equal(entry.options.label, '酒館', '入口要有標籤（側邊欄拿它當 aria／提示）')
 
   // 尺寸由側邊欄給（`SidebarPanelIconOwnerProps.size`）——寫死 16 在收合的側邊欄裡會歪。
@@ -491,8 +526,240 @@ assert.deepEqual([...registerCount.entries()].filter(([, n]) => n > 1), [], '不
   assert.equal(icon.props.height, 24, '圖示要照側邊欄給的尺寸（高）')
   assert.equal(entry.component({ size: 16 }).props.width, 16, '沒指定尺寸時側邊欄給的就是 16')
 }
+
+
+/* ------------------------------ 酒館街（街頁） ------------------------------ */
+
+// 街是插件的首頁：`main:tavern-street` 與插件頁的 `plugins.tab` 共用同一個元件。
+// 這裡用 `__testSeed.street` 直接餵資料（街的資料來自 `street.cards`，那條路
+// 住在宿主半，離線測試不跑真 RPC）。
+{
+  const { TavernStreetPage, TavernStreetTab } = exportsObject.__components
+  assert.equal(typeof TavernStreetPage, 'function', '要有街頁元件')
+  assert.equal(typeof TavernStreetTab, 'function', '插件頁分頁也要有元件')
+  const renderPage = () => renderComponent(TavernStreetPage, {})
+
+  // 載入那條路：先試 `street.cards`，舊宿主（unknown op）退回 `tavern.list`。
+  // 用原始碼釘住，因為離線測試沒有真宿主可以分版本。
+  assert.match(source, /rpc\('street\.cards'/, '街頁要讀 street.cards')
+  assert.match(source, /unknown op/i, '舊宿主要退回 tavern.list')
+
+  exportsObject.__testSeed.street = {
+    activeId: 't1',
+    cards: [
+      {
+        id: 't1',
+        name: '預設酒館',
+        path: 'C:\\Users\\x\\tavern',
+        icon: '',
+        exists: true,
+        scaffolded: true,
+        active: true,
+        front: '/api/dsh-tavern/assets/tavern/店面.png',
+        shop: {
+          sign: '醉月樓',
+          tagline: '今夜有酒，也有故事。',
+          signStyle: 'projecting',
+          facade: 'noren',
+          frame: 'break',
+          frameShape: 'arch',
+          roof: 'eaves',
+          plant: 'bush',
+          windows: 'plain',
+          door: 'square',
+          awning: 'solid',
+          lantern: 'cool',
+          palette: {
+            accent: '#E8A33D',
+            accentSoft: 'rgba(232,163,61,.14)',
+            surface: '#1B1611',
+            surface2: '#241C16',
+            surface3: '#2E241C',
+            text: '#F3E6D2',
+            text2: '#C6B199',
+            line: '#3A2E25',
+            glow: '#D98A2B',
+          },
+        },
+        counts: { characters: 2, worldbooks: 1, chats: 1 },
+        rooms: [{ room: 'r1', name: '初次見面', character: '老闆娘', mtimeMs: 1 }],
+      },
+      {
+        id: 't2',
+        name: '鯨落',
+        path: 'D:\\酒館\\鯨落',
+        icon: '🍺',
+        exists: false,
+        scaffolded: false,
+        active: false,
+        counts: { characters: 0, worldbooks: 0, chats: 0 },
+        rooms: [],
+      },
+    ],
+  }
+  reactImpl.resetHooks()
+  const tree = renderPage()
+  const text = flatten(tree)
+  assert.ok(text.includes('酒館街'), '街頁要有標題')
+  assert.ok(text.includes('預設酒館'), '要列出酒館')
+  assert.ok(text.includes('鯨落'), '要列出第二間酒館')
+  assert.ok(text.includes('2 張卡'), '要顯示卡數')
+  assert.ok(text.includes('1 本書'), '要顯示書數')
+  assert.ok(text.includes('1 間房'), '要顯示房間數')
+  assert.ok(text.includes('目前'), '要標出目前酒館')
+  assert.ok(text.includes('資料夾不見了'), 'missing 的資料夾要說出來')
+  assert.ok(text.includes('最近') && text.includes('初次見面'), '要顯示最近一間房')
+  // 入口是牌坊；店面排在街的左右兩側（不是一條清單）。
+  assert.equal(collect(tree, (el) => el.props.className === 'dsh-tv-paifang').length, 1, '入口要有牌坊')
+  assert.equal(
+    collect(tree, (el) => el.props.className === 'dsh-tv-paifangPlaque').length,
+    1,
+    '牌坊上要有街招',
+  )
+  const avenue = collect(tree, (el) => el.props.className === 'dsh-tv-streetAvenue')
+  assert.equal(avenue.length, 1, '店面要放在街道容器裡')
+  assert.equal(avenue[0].props.children.length, 4, '兩間店＋一條街＋彩旗')
+  assert.equal(
+    collect(tree, (el) => el.props.className === 'dsh-tv-streetRoad').length,
+    1,
+    '街要有自己的路面（不是一條分隔線）',
+  )
+  const flags = collect(tree, (el) => el.props.className === 'dsh-tv-streetFlag')
+  assert.equal(flags.length, 7, '路口要有彩旗')
+  assert.equal(flags[0].props.style['--flag'], '#E8A33D', '彩旗要用店面的 accent')
+  // 店舖太大時街道會被吃掉、頁面也捲不動；這兩條都是實際回報過的。
+  assert.match(
+    codeSource,
+    /\.dsh-tv-streetPage\{[\s\S]*?overflow-y:auto/,
+    '街頁要自己捲動（主面板高度不是無限的）',
+  )
+  const fronts = collect(tree, (el) => typeof el.props.className === 'string' && el.props.className.split(' ').includes('dsh-tv-tavernCardFront'))
+  assert.equal(fronts.length, 2, '每張卡都要有店面區')
+  const frontImgs = collect(tree, (el) => typeof el.props.className === 'string' && el.props.className.split(' ').includes('dsh-tv-tavernCardFrontImg'))
+  assert.equal(frontImgs.length, 1, '只有有店面圖的那張卡要畫圖')
+  assert.ok(String(frontImgs[0].props.src).includes('店面.png'), '店面圖要畫出來')
+  assert.equal(frontImgs[0].props.loading, 'lazy', '店面圖要 lazy load')
+  assert.equal(frontImgs[0].props.alt, '', '店面圖是裝飾（名字在旁邊）')
+  // 店面：每一間店自己的招牌／樣式，顏色吃該酒館 theme 的色盤。
+  assert.ok(text.includes('醉月樓'), '要畫出這間店自己的招牌')
+  assert.ok(text.includes('今夜有酒'), '要畫出一句話')
+  assert.equal(fronts[0].props['data-facade'], 'noren', '店面樣式要傳到 DOM')
+  assert.equal(fronts[0].props['data-awning'], 'solid', '遮陽棚樣式要傳到 DOM')
+  assert.equal(fronts[0].props['data-lantern'], 'cool', '燈籠樣式要傳到 DOM')
+  assert.equal(fronts[0].props['data-sign'], 'projecting', '破框招牌樣式要傳到 DOM')
+  assert.equal(fronts[0].props['data-frame'], 'break', '越界權限要傳到 DOM')
+  assert.equal(fronts[0].props['data-shape'], 'arch', '邊框形狀要傳到 DOM')
+  assert.equal(fronts[0].props['data-roof'], 'eaves', '屋簷要傳到 DOM')
+  assert.equal(fronts[0].props['data-plant'], 'bush', '門口植物要傳到 DOM')
+  assert.equal(fronts[0].props['data-windows'], 'plain', '窗戶樣式要傳到 DOM')
+  assert.equal(fronts[0].props['data-door'], 'square', '門樣式要傳到 DOM')
+  assert.equal(fronts[0].props.style['--shop-accent'], '#E8A33D', '店面要吃這間酒館主題的強調色')
+  assert.equal(fronts[1].props['data-facade'], 'classic', '沒有 shop 的店要用預設店面')
+  assert.equal(fronts[1].props.style['--shop-accent'], 'var(--tv-street-accent)', '沒有色盤時用街道 fallback')
+
+  // 卡片上的三顆動作（missing 那張仍有「移除」，但「進入」停用）。
+  const openButtons = collect(tree, (el) => el.type === 'button' && flatten(el) === '進入酒館')
+  assert.equal(openButtons.length, 2, '每間酒館一張卡（兩顆進入）')
+  assert.equal(openButtons[1].props.onClick, undefined, '資料夾不見的那張不能進去')
+  const continueButtons = collect(tree, (el) => el.type === 'button' && flatten(el) === '繼續對話')
+  assert.equal(continueButtons.length, 2, '兩張卡都有繼續（沒有房間的停用）')
+  assert.equal(continueButtons[1].props.onClick, undefined, '沒有房間／資料夾不見時不能繼續')
+
+  // 分頁元件畫的是同一條街，不是另一份。
+  reactImpl.resetHooks()
+  const tab = renderComponent(TavernStreetTab, {})
+  assert.ok(flatten(tab).includes('預設酒館'), '插件分頁要畫同一條街')
+
+  // 空街：一顆「開第一間酒館」的入口。
+  exportsObject.__testSeed.street = { activeId: '', cards: [] }
+  reactImpl.resetHooks()
+  const empty = flatten(renderPage())
+  assert.ok(empty.includes('這條街還沒有酒館'), '空街要有空狀態')
+  assert.ok(empty.includes('開第一間酒館'), '空街要有新增入口')
+
+  exportsObject.__testSeed.street = null
+  reactImpl.resetHooks()
+  requests.length = 0
+}
+
+/* ------------------------------ 房間的快捷換色 ------------------------------ */
+// 使用者：「進去房間後才處理」——換色在 ⚙️ 房間 分頁，街固定跟 DSH。
+{
+  const { ThemeQuickPick } = exportsObject.__components
+  const { presets } = exportsObject.__theme
+  assert.equal(typeof ThemeQuickPick, 'function', '要有房間裡的快捷換色')
+  assert.ok(presets.length >= 4, '至少要有四組 preset')
+  const calls = []
+  exportsObject.__setRpc((op, args) => {
+    calls.push({ op, args })
+    if (op === 'theme.write') return Promise.resolve({})
+    if (op === 'theme.read') {
+      return Promise.resolve({ theme: { base: 'dark', tokens: {}, style: {} } })
+    }
+    return Promise.resolve({})
+  })
+  reactImpl.resetHooks()
+  const tree = renderComponent(ThemeQuickPick, { tavernId: 't1' })
+  const text = flatten(tree)
+  assert.ok(text.includes('這間酒館的外觀'), '要說出這是酒館的外觀')
+  assert.ok(text.includes('暖燈') && text.includes('墨藍') && text.includes('紙白'), '要有 preset')
+  assert.ok(text.includes('街道固定跟 DSH'), '要說清楚街不吃這一份')
+  const ink = collect(tree, (el) => el.type === 'button' && flatten(el).includes('墨藍'))
+  assert.equal(ink.length, 1, '墨藍要是一顆按鈕')
+  ink[0].props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const write = calls.find((one) => one.op === 'theme.write')
+  assert.ok(write !== undefined, '按了要寫 theme.write')
+  assert.equal(write.args.id, 't1')
+  assert.equal(write.args.patch.base, 'dark')
+  assert.equal(write.args.patch.tokens.accent, '#6FA8DC')
+  assert.equal(write.args.patch.tokens['surface-0'], '#0E131A')
+  exportsObject.__setRpc(null)
+}
+
 const seatsDone = requests.length
 console.log('2. apply OK —', seats.length, '個座位')
+
+/* ------------------------------ 店面設定 ------------------------------ */
+{
+  const { ShopSettings } = exportsObject.__components
+  assert.equal(typeof ShopSettings, 'function', '要有店面設定')
+  const calls = []
+  exportsObject.__setRpc((op, args) => {
+    calls.push({ op, args })
+    if (op === 'shop.write') return Promise.resolve({ exists: true, broken: false, shop: args.patch })
+    if (op === 'shop.read') return Promise.resolve({ exists: false, broken: false, shop: { sign: '', tagline: '' } })
+    return Promise.resolve({})
+  })
+  reactImpl.resetHooks()
+  const tree = renderComponent(ShopSettings, { tavern: { id: 't1', name: '預設酒館' } })
+  const text = flatten(tree)
+  assert.ok(text.includes('店面（街上看到的那張臉）'), '要有店面區塊')
+  const sign = collect(tree, (el) => el.type === 'input' && el.props['aria-label'] === '招牌字')
+  const tagline = collect(tree, (el) => el.type === 'input' && el.props['aria-label'] === '店面的一句話')
+  assert.equal(sign.length, 1, '要有招牌字輸入')
+  assert.equal(tagline.length, 1, '要有一句話輸入')
+  sign[0].props.onChange({ target: { value: '醉月樓' } })
+  tagline[0].props.onChange({ target: { value: '今夜有酒' } })
+  const save = collect(tree, (el) => el.type === 'button' && flatten(el) === '儲存店面')
+  assert.equal(save.length, 1, '要有儲存店面')
+  save[0].props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const write = calls.find((one) => one.op === 'shop.write')
+  assert.ok(write !== undefined, '按了要寫 shop.write')
+  assert.equal(write.args.id, 't1')
+  assert.equal(write.args.patch.sign, '醉月樓')
+  assert.equal(write.args.patch.tagline, '今夜有酒')
+  assert.equal(write.args.patch.signStyle, 'hanging')
+  assert.equal(write.args.patch.facade, 'classic')
+  assert.equal(write.args.patch.frame, 'normal')
+  assert.equal(write.args.patch.frameShape, 'rounded')
+  assert.equal(write.args.patch.roof, 'none')
+  assert.equal(write.args.patch.plant, 'none')
+  assert.equal(write.args.patch.windows, 'cross')
+  assert.equal(write.args.patch.door, 'arch')
+  exportsObject.__setRpc(null)
+}
 
 /* ------------------------------ 測試用的小工具 ------------------------------ */
 
@@ -549,44 +816,6 @@ const TAVERNS = [
 const renderStreet = (extra = {}) =>
   renderComponent(TavernStreet, { taverns: TAVERNS, loaded: true, reload: () => {}, wide: true, opened: true, ...extra })
 
-/* ------------------------ 啟動時不做任何事，按了才做 ------------------------ */
-
-{
-  assert.equal(seatsDone, 0, 'apply() 期間不可以送出任何請求')
-
-  const region = injections.find((record) => record.options.name === 'sidebar.workspaces')
-  assert.ok(region !== undefined, '側邊欄座位存在')
-  reactImpl.enter()
-  const regionTree = region.component({ wide: true, renderSlot: () => null })
-
-  // 側邊欄區塊一直掛在畫面上，所以「掛載」等於「DSH 一開啟」。
-  assert.equal(requests.length, 0, '側邊欄掛載時不可以送出任何請求')
-  assert.ok(flatten(regionTree).includes('酒館街'), '收合狀態仍要看得到區塊標題')
-
-  const toggle = findButton(regionTree, '顯示酒館街')
-  assert.ok(toggle !== null, '要有「顯示酒館街」的按鈕（收合狀態）')
-  assert.equal(toggle.props['aria-expanded'], 'false', '預設要是收合的')
-
-  // 沒展開的區塊不可以列出酒館，也不可以出現「讀取中…」。
-  assert.equal(flatten(regionTree).includes('讀取中'), false, '還沒按就不該假裝在讀取')
-
-  toggle.props.onClick({ preventDefault() {} })
-  const asked = requests.map((request) => request.url)
-  assert.equal(requests.length, 1, `按了「顯示酒館街」剛好送出 1 個請求，實際 ${requests.length} 個`)
-  assert.ok(asked[0].includes('op=tavern.list'), `按了才讀清單，實際請求 ${asked[0]}`)
-
-  // 酒館列的動作與展開仍然只在使用者按下去時才動。
-  requests.length = 0
-  const openStreet = renderStreet({ opened: true })
-  assert.equal(requests.length, 0, '光是展開酒館街不該再送出請求（清單已經有了）')
-  const rowToggle = collect(
-    openStreet,
-    (el) => typeof el.props.className === 'string' && el.props.className.split(' ').includes('dsh-tv-row'),
-  )[0]
-  assert.equal(requests.length, 0, '列出酒館列本身不該讀磁碟')
-  assert.ok(typeof rowToggle.props.onClick === 'function', '酒館列要能點開')
-  console.log('2b. 惰性載入 OK — apply 與掛載 0 個請求，按「顯示酒館街」才讀清單')
-}
 
 /* --------------------------- 酒館街（照原生度量） --------------------------- */
 
@@ -752,33 +981,6 @@ const renderStreet = (extra = {}) =>
   __setRpc(null)
   console.log('12. 對話列 OK — slot／title／time／actions 四部分齊全、⋯ 開 body 底下的選單')
 
-  /* ---- 分隔線的「動態感」：照原生 widthHandle（游標到哪，光就在哪）---- */
-  {
-    // 使用者貼了原生的 `widthHandle` 並說「這裏能夠動態調整至中」——原生不是畫一條
-    // 固定的線，而是用 `:after` 畫一段**以游標位置為中心**的漸層光條，中心點由 JS
-    // 寫進 `--dsh-width-handle-pointer-y`（`e.clientY - box.top`）。我們照抄。
-    assert.match(
-      source,
-      /getBoundingClientRect\(\)[\s\S]{0,200}?--dsh-tv-pointer-y/,
-      '分隔線要把游標位置寫進 --dsh-tv-pointer-y（原生 widthHandle 的做法）',
-    )
-    assert.match(
-      source,
-      /onMouseMove: trackPointer/,
-      '分隔線要接上 onMouseMove（不然光不會跟著手走）',
-    )
-    assert.match(
-      source,
-      /linear-gradient\(to bottom,transparent calc\(var\(--dsh-tv-pointer-y,50%\)/,
-      ':after 要用以 --dsh-tv-pointer-y 為中心的漸層（±6px 淡出）',
-    )
-    assert.match(
-      source,
-      /'data-dragging': state\.dragging/,
-      '拖曳中要標記 data-dragging（跟原生一樣持續亮著）',
-    )
-  }
-
   /* ---- 聊天室要貼底（思考的時候不能要自己手動滾下去）---- */
   {
     // 我們的重繪是指令式的，所以規矩要自己寫：**只有使用者本來就貼著底**才自動捲，
@@ -847,10 +1049,10 @@ const renderStreet = (extra = {}) =>
     // ⚠️ 這一條以前是掃 `--dsw-alias-bg-elevated` 這個**名字**；token 遷移之後
     // 正確的判準改變了：**元件樣式不准再引用宿主的 `--dsw-*` 顏色**（掃 MAP_CSS，
     // 那是元件樣式的範圍），而 `inheritTheme()` 負責把側邊欄當下的值複製過來。
-    // ⚠️ **兩個區，規矩相反**（使用者：「酒館街是建在 DSH 當中，應該跟從系統；
-    // 不同風格是指具體酒館就像酒館有不同的裝修風格」）：
-    //   側邊欄（酒館街）＝DSH 的導航 → **必須**用宿主的 `--dsw-*`，才會跟著 DSH 主題
-    //   主面板（大廳／包廂／卡司／藏書）＝酒館自己的空間 → **不准**用宿主變數，
+    // ⚠️ **兩個規矩、三個區**（使用者：「酒館街是建在 DSH 當中，應該跟從系統；
+    // 不同風格是指具體酒館就像酒館有不同的裝修風格」「街道就盡量貼合 DSH」）：
+    //   DSH 區（側邊欄＋酒館街）＝DSH 的導航 → **必須**用宿主的 `--dsw-*`
+    //   酒館區（大廳／包廂／卡司／藏書／房間）＝酒館自己的空間 → **不准**用宿主變數，
     //     要全部走 `--dsh-tv-*`，這樣 `theme.json` 才換得動
     const sidebarSelectors = [
       '.dsh-tv-street', '.dsh-tv-section', '.dsh-tv-iconBtn', '.dsh-tv-region',
@@ -860,6 +1062,10 @@ const renderStreet = (extra = {}) =>
       '.dsh-tv-sideManual', '.dsh-tv-sideInput', '.dsh-tv-overflow', '.dsh-tv-divider',
       '.dsh-tv-cardName', '.dsh-tv-cardDesc', '.dsh-tv-tavernDot', '.dsh-tv-tavernName',
       '.dsh-tv-spin', '.dsh-tv-face', '.dsh-tv-count', '.dsh-tv-rename', '.dsh-tv-menu',
+      // 2.10：街雖然在 main 面板，但它是「去酒館的導航」——跟側邊欄同一區，
+      // 一律吃 DSH 原生 `--dsw-*`，不跟酒館 theme。
+      '.dsh-tv-tavernCard', '.dsh-tv-tavernStat', '.dsh-tv-tavernAdd', '.dsh-tv-tavernSkeleton',
+      '.dsh-tv-paifang', '.dsh-tv-streetAvenue', '.dsh-tv-streetEnd',
     ]
     const mapLines = codeSource
       .slice(
@@ -890,7 +1096,12 @@ const renderStreet = (extra = {}) =>
     )
     assert.ok(
       sideUsage.length >= 5,
-      '側邊欄（酒館街）要用宿主的 --dsw-* 變數，才會跟著 DSH 主題走（目前 ' + sideUsage.length + ' 處）',
+      'DSH 區（側邊欄／街）要用宿主的 --dsw-* 變數，才會跟著 DSH 主題走（目前 ' + sideUsage.length + ' 處）',
+    )
+    assert.match(
+      codeSource,
+      /--tv-street-surface:var\(--dsw-alias-bg-layer-1\)/,
+      '街的調色盤要從 DSH 原生 token 收斂（--tv-street-* ← --dsw-*）',
     )
     assert.equal(
       /var\(--dsw-alias-bg-elevated/.test(codeSource),
@@ -3969,13 +4180,13 @@ function spyRpc(seen, extra) {
 
   // 三個分區都要真的訂閱（少一個就是那個分區的清單永遠不會更新），
   // 加上對話頁自己那一條（它要靠這個發現「我正在看的對話被刪掉了」），
-  // 再加上 hook 本身的宣告。
+  // 加上街頁那一條（回到街時卡片要重讀），再加上 hook 本身的宣告。
   // 這個數字包含**一行文件註解裡的提及**（`useRefreshChannelRerender` 的說明裡
-  // 拿它對比）——所以是 5 個真的訂閱點 ＋ 1 行註解。
+  // 拿它對比）——所以是 6 個真的訂閱點 ＋ 1 行註解。
   assert.equal(
     (source.match(/useRefreshVersion\(/g) || []).length,
-    6,
-    '插圖、世界書、對話三個分區、對話頁自己（4）＋ hook 宣告（1）＋ 註解裡的提及（1）',
+    7,
+    '插圖、世界書、對話三個分區、對話頁自己、街頁（5）＋ hook 宣告（1）＋ 註解裡的提及（1）',
   )
   // 側邊欄訂閱「只重畫、不重讀」那一條：對話開始／結束跑時要換圖示，
   // 但不必為了一顆圖示重讀六份 `.jsonl`。
@@ -4791,12 +5002,19 @@ function spyRpc(seen, extra) {
     exportsObject.__setChatTab('file')
     const onFile = flatten(renderChat())
     assert.ok(
-      onFile.includes('chats/老闆娘/m1k3x9-a7f2'),
+      onFile.includes('rooms/m1k3x9-a7f2'),
       '檔案分頁要看得到房間資料夾（用 id，不是名字）：' + onFile.slice(0, 120),
     )
     assert.ok(onFile.includes('room.json'), '而且要指出設定檔在哪（那是使用者要改的東西）')
     assert.ok(onFile.includes('複製路徑'), '要給「複製路徑」——使用者要的是能直接貼進檔案總管')
     assert.equal(onFile.includes('加入插圖'), false, '檔案分頁不該有插圖管理器')
+
+    // P4：房間的 session 不見了，要在**送訊息前**說（不是送出後才讓使用者發現）。
+    // 離線測試的假 React 不跑 effect，所以這裡釘住「有這條路」與「它只讀不寫」。
+    assert.match(codeSource, /function checkSession\(\)/, '要有進房時的 session 檢查')
+    assert.match(codeSource, /session 不見了/, '要說得出 session 不見了')
+    assert.match(codeSource, /service\.list\(\{\}\)/, '要用 remote.session.list 對照')
+
 
     exportsObject.__setChatTab('chat')
     exportsObject.__selectChat(null)
@@ -5518,10 +5736,10 @@ function spyRpc(seen, extra) {
     codeSource.indexOf("].join('')", codeSource.indexOf('var MAP_CSS = [')),
   )
   assert.ok(mapCss.length > 1000, '應該切得出 MAP_CSS 的範圍')
-  // ⚠️ 寫死的 hex 只**不准出現在主面板區**。側邊欄那一區的宿主變數**需要** fallback
-  // （`var(--dsw-alias-label-secondary,#9aa4b2)`）——那是深色主題的保底值，
-  // 而側邊欄的規矩本來就是「跟宿主一致」。
-  // 主面板區的規矩相反：全部走 `--dsh-tv-*`，這樣 `theme.json` 才換得動。
+  // ⚠️ 寫死的 hex 只**不准出現在酒館區**。DSH 區（側邊欄＋街）的宿主變數**需要**
+  // fallback（`var(--dsw-alias-label-secondary,#9aa4b2)`）——那是深色主題的保底值，
+  // 而 DSH 區的規矩本來就是「跟宿主一致」。
+  // 酒館區的規矩相反：全部走 `--dsh-tv-*`，這樣 `theme.json` 才換得動。
   const sidebarPrefixes = [
     '.dsh-tv-street', '.dsh-tv-section', '.dsh-tv-iconBtn', '.dsh-tv-region',
     '.dsh-tv-row', '.dsh-tv-slot', '.dsh-tv-folder', '.dsh-tv-chevron',
@@ -5530,6 +5748,10 @@ function spyRpc(seen, extra) {
     '.dsh-tv-sideManual', '.dsh-tv-sideInput', '.dsh-tv-overflow', '.dsh-tv-divider',
     '.dsh-tv-cardName', '.dsh-tv-cardDesc', '.dsh-tv-tavernDot', '.dsh-tv-tavernName',
     '.dsh-tv-spin', '.dsh-tv-face', '.dsh-tv-count', '.dsh-tv-rename', '.dsh-tv-menu',
+    // 2.10：街雖然在 main 面板，但它是「去酒館的導航」——跟側邊欄同一區，
+    // 一律吃 DSH 原生 `--dsw-*`，不跟酒館 theme。
+    '.dsh-tv-tavernCard', '.dsh-tv-tavernStat', '.dsh-tv-tavernAdd', '.dsh-tv-tavernSkeleton',
+    '.dsh-tv-paifang', '.dsh-tv-streetAvenue', '.dsh-tv-streetEnd',
   ]
   let inSide = false
   const mainHex = []
@@ -5553,9 +5775,16 @@ function spyRpc(seen, extra) {
   // 圓角只能有四階（改版前有 7 種不一致的值）；兩個例外是圓形與那道光的微圓角
   const radiusAllow = ['border-radius:50%', 'border-radius:3px']
   const radius = [...new Set(codeSource.match(/border-radius:[^;'"]+/g) || [])].filter(
-    (one) => one.includes('var(--dsh-tv-radius') === false && radiusAllow.includes(one) === false,
+    (one) =>
+      one.includes('var(--dsh-tv-radius') === false &&
+      one.includes('var(--tv-street-radius') === false &&
+      radiusAllow.includes(one) === false,
   )
-  assert.deepEqual(radius, [], '圓角只能走 var(--dsh-tv-radius-*)：' + radius.join(', '))
+  assert.deepEqual(
+    radius,
+    [],
+    '圓角只能走 var(--dsh-tv-radius-*)（酒館）或 var(--tv-street-radius-*)（街）：' + radius.join(', '),
+  )
 
   /**
    * ⚠️ **`.dsh-tv-view` 不可以是絕對定位**（2026-09-27 在真的瀏覽器上量到的）。

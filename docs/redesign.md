@@ -694,6 +694,12 @@ if (connection && connection.rpc) {
 （但這會改變現在的外觀——酒館街不再是原生清單下面那一段、也沒有拖曳分隔線——
 所以那是你的決定，不是我的。）
 
+> ✅ **2026-11-08 定案：兩者都要。** `sidebar.panellist` 只有面板入口，**不能**取代
+> 酒館街——酒館街是「酒館 → 對話」的兩層清單，這是原生清單沒有的東西。
+> 而接管 single 座位真正的風險不是 priority（DSH 的規則是 `lowest renders`，
+> `-1` 本來就贏過原生的 `0`），是 `renderSlot` 的**授權邊界**：勝出的那一筆只
+> 認自己宣告過的子座位。修法與事故記錄在 `plan.md` §7.6／`CHANGELOG.md` 2.7.2。
+
 ### 11.3 客戶端半的載入規則（只有兩條）
 
 `dsh-client-modules/lib/index.js:637-666`（`resolveMeta`）＋ `:155-166`（`clientExportOf`）：

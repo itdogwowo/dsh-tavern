@@ -126,6 +126,95 @@ try {
     console.log('2b. 主題 OK — theme.json 的 style 存得住、壞檔會回報、custom.css 原樣讀出')
   }
 
+  /* --- 2c. 店面（shop.json）-------------------------------------------- */
+  {
+    const none = await ws.readShop()
+    assert.equal(none.exists, false, '沒有 shop.json 時 exists 要是 false')
+    assert.equal(none.broken, false, '沒有檔案不算壞掉')
+    assert.equal(none.shop.sign, '', '預設招牌是空字串（client 用酒館名稱）')
+    assert.equal(none.shop.signStyle, 'hanging', '預設吊牌')
+    assert.equal(none.shop.facade, 'classic', '預設經典店面')
+    assert.equal(none.shop.awning, 'stripes', '預設條紋遮陽棚')
+    assert.equal(none.shop.lantern, 'warm', '預設暖燈')
+    assert.equal(none.shop.frame, 'normal', '預設規矩框架')
+    assert.equal(none.shop.frameShape, 'rounded', '預設圓角')
+    assert.equal(none.shop.roof, 'none', '預設沒有屋簷')
+    assert.equal(none.shop.plant, 'none', '預設沒有植物')
+    assert.equal(none.shop.windows, 'cross', '預設十字窗')
+    assert.equal(none.shop.door, 'arch', '預設拱門')
+
+    const saved = await ws.writeShop({
+      sign: '醉月樓',
+      tagline: '今夜有酒，也有故事。',
+      signStyle: 'projecting',
+      facade: 'noren',
+      frame: 'break',
+      frameShape: 'arch',
+      roof: 'eaves',
+      plant: 'bush',
+      windows: 'plain',
+      door: 'square',
+      awning: 'none',
+      lantern: 'cool',
+      junk: '不該留',
+    })
+    assert.equal(saved.shop.sign, '醉月樓')
+    assert.equal(saved.shop.signStyle, 'projecting', '招牌樣式要留下')
+    assert.equal(saved.shop.facade, 'noren', '店面樣式要留下')
+    assert.equal(saved.shop.frame, 'break', '破框要留下')
+    assert.equal(saved.shop.frameShape, 'arch', '邊框形狀要留下')
+    assert.equal(saved.shop.roof, 'eaves', '屋簷要留下')
+    assert.equal(saved.shop.plant, 'bush', '植物要留下')
+    assert.equal(saved.shop.windows, 'plain', '窗戶要留下')
+    assert.equal(saved.shop.door, 'square', '門要留下')
+
+    const onDisk = JSON.parse(await readFile(join(root, 'shop.json'), 'utf8'))
+    assert.equal(onDisk.version, 1, '店面檔要有版本號')
+    assert.equal(onDisk.sign, '醉月樓')
+    assert.equal(onDisk.frame, 'break')
+    assert.equal(onDisk.junk, undefined, '不認得的 key 不能寫進檔案')
+
+    const reread = await ws.readShop()
+    assert.equal(reread.exists, true)
+    assert.equal(reread.broken, false)
+    assert.equal(reread.shop.tagline, '今夜有酒，也有故事。')
+    assert.equal(reread.shop.awning, 'none')
+    assert.equal(reread.shop.lantern, 'cool')
+
+    // 超長與打錯的樣式：收斂，不要讓壞值進 DOM。
+    const messy = await ws.writeShop({
+      sign: '招'.repeat(30),
+      signStyle: 'neon',
+      facade: 'castle',
+      awning: '???',
+      lantern: '???',
+      frame: '???',
+      frameShape: '???',
+      roof: '???',
+      plant: '???',
+      windows: '???',
+      door: '???',
+    })
+    assert.equal(Array.from(messy.shop.sign).length, 24, '招牌最多 24 字')
+    assert.equal(messy.shop.signStyle, 'hanging', '打錯的招牌樣式要落回預設')
+    assert.equal(messy.shop.facade, 'classic', '打錯的店面樣式要落回預設')
+    assert.equal(messy.shop.frame, 'normal', '打錯的框架要落回規矩')
+    assert.equal(messy.shop.frameShape, 'rounded', '打錯的形狀要落回圓角')
+    assert.equal(messy.shop.roof, 'none', '打錯的屋簷要落回沒有')
+    assert.equal(messy.shop.plant, 'none', '打錯的植物要落回沒有')
+    assert.equal(messy.shop.windows, 'cross', '打錯的窗戶要落回十字')
+    assert.equal(messy.shop.door, 'arch', '打錯的門要落回拱門')
+
+    await writeFile(join(root, 'shop.json'), '{ 壞掉', 'utf8')
+    const broken = await ws.readShop()
+    assert.equal(broken.exists, true)
+    assert.equal(broken.broken, true, '壞檔要回報')
+    assert.equal(broken.shop.signStyle, 'hanging', '壞檔用預設')
+    await rm(join(root, 'shop.json'), { force: true })
+
+    console.log('2c. 店面 OK — shop.json 的招牌與樣式存得住、壞檔會回報、不認得的 key 會被丟掉')
+  }
+
   /* --- 3. 人物卡 -------------------------------------------------------- */
   {
     const id = await ws.writeCharacter('', { name: '測試劍士', description: '很會測試。' })
@@ -195,7 +284,7 @@ try {
     assert.match(created.room, /^[0-9a-z]+-[0-9a-z]{4}$/, 'id 是「時間 base36-隨機 4 碼」：' + created.room)
 
     // 佈局：設定、對話、插圖三個東西都在**同一個資料夾**裡。
-    const dir = join(root, 'chats', '測試劍士', created.room)
+    const dir = join(root, 'rooms', created.room)
     assert.equal(await existsFile(join(dir, 'room.json')), true, 'room.json 要在房間資料夾裡')
     assert.equal(await existsFile(join(dir, 'chat.jsonl')), true, 'chat.jsonl 要在房間資料夾裡')
     assert.equal(await existsDir(join(dir, 'art')), true, 'art/ 要在房間資料夾裡')
@@ -292,13 +381,14 @@ try {
 
   /* --- 8. 插圖的識別與防護 --------------------------------------------- */
   {
-    // 對話名是使用者取的，可能含不能當資料夾名的字元 → 正規化成 assetId。
-    assert.equal(assetIdFor('chat', '老闆娘/初次見面'), '老闆娘/初次見面')
-    assert.equal(assetIdFor('chat', '老闆娘/初次 見面!'), '老闆娘/初次-見面')
-    assert.equal(assetIdFor('chat', '老闆娘/a&b'), '老闆娘/a-b')
+    // 2.8：房間的身分是 roomId（一段）；舊的「角色/房間」仍然收，取最後一段。
+    assert.equal(assetIdFor('chat', '老闆娘/初次見面'), '初次見面', '舊的兩段：取房間那一段')
+    assert.equal(assetIdFor('chat', '初次見面'), '初次見面', '一段就是房間 id')
+    assert.equal(assetIdFor('chat', '老闆娘/初次 見面!'), '初次-見面')
+    assert.equal(assetIdFor('chat', '老闆娘/a&b'), 'a-b')
     assert.equal(assetIdFor('character', '老闆娘'), '老闆娘')
     assert.equal(assetIdFor('tavern', ''), '')
-    assert.throws(() => assetIdFor('chat', '只有角色'), /對話名/, '對話 id 一定要有「角色/對話名」')
+    assert.throws(() => assetIdFor('chat', ''), /不可為空/, '房間 id 不可以是空的')
     assert.throws(() => parseAssetOwner('character', '../逃出去'), /不合法/)
 
     // 同一組對話名每次都要拿到同一組 assetId（不然重開面板就找不到自己的圖）。
@@ -328,9 +418,9 @@ try {
     // 用圖片副檔名試著跳脫：要在 id 這一層就被擋下。
     assert.throws(() => resolveAssetPath('/root', ['characters', '..', 'x.png']), /不合法/)
     assert.throws(() => resolveAssetPath('/root', ['nope', '甲', 'x.png']), /不認得/)
-    assert.throws(() => resolveAssetPath('/root', ['chats', '甲', '初次見面', 'x.txt']), /不是圖片/)
-    // 對話資產一定要三層（種類／角色／對話 id／檔名）。
-    assert.throws(() => resolveAssetPath('/root', ['chats', '甲', 'x.png']), /對話資產需要/)
+    assert.throws(() => resolveAssetPath('/root', ['chats', '初次見面', 'x.txt']), /不是圖片/)
+    // 2.8：對話資產是「種類／房間 id／檔名」（舊的「種類／角色／房間 id／檔名」也收）。
+    assert.throws(() => resolveAssetPath('/root', ['chats', 'x.png']), /對話資產需要/)
     console.log('8. 插圖識別 OK — assetId 正規化、撞名、magic bytes、路徑防護')
   }
 
@@ -565,7 +655,7 @@ try {
     const roomOff = await ws5.writeRoom('甲', made.room, { stopEnabled: false })
     assert.equal(roomOff.stopEnabled, false, '⚠️ 房間層的 false 要存得下去（蓋過酒館的開）')
     assert.equal(
-      JSON.parse(await readFile(join(root, 'chats', '甲', made.room, 'room.json'), 'utf8')).stopEnabled,
+      JSON.parse(await readFile(join(root, 'rooms', made.room, 'room.json'), 'utf8')).stopEnabled,
       false,
       '磁碟上是 false，不是 null',
     )
@@ -771,22 +861,22 @@ try {
 
     const created = await seedWs.seed()
     // 房間的 id 是隨機的，所以先把它挑出來、其餘照順序比對。
-    const roomEntry = created.filter((item) => /^chats\//.test(item))
+    const roomEntry = created.filter((item) => /^rooms\//.test(item))
     assert.equal(roomEntry.length, 1, '新酒館要附**一間**可以直接聊的房間：' + created.join(', '))
     assert.match(
       roomEntry[0],
-      /^chats\/老闆娘\/[a-z0-9]+-[a-z0-9]+\/chat\.jsonl$/,
-      '房間路徑要是 chats/<角色>/<房間 id>/chat.jsonl：' + roomEntry[0],
+      /^rooms\/[a-z0-9]+-[a-z0-9]+\/chat\.jsonl$/,
+      '房間路徑要是 rooms/<房間 id>/chat.jsonl：' + roomEntry[0],
     )
     assert.deepEqual(
-      created.filter((item) => !/^chats\//.test(item)).sort(),
+      created.filter((item) => !/^rooms\//.test(item)).sort(),
       ['characters/老闆娘.png', 'custom.css', 'worldbooks/輸出格式.json', 'worldbooks/酒館.json'],
       '應該回報實際建立了這些（預設角色是 PNG 卡）：' + created.join(', '),
     )
     // 預設房間：room.json ＋ chat.jsonl（標頭）＋ 開場白（卡片的 first_mes）
-    const roomId = roomEntry[0].split('/')[2]
+    const roomId = roomEntry[0].split('/')[1]
     const roomSettings = JSON.parse(
-      await readFile(join(seedRoot, 'chats', '老闆娘', roomId, 'room.json'), 'utf8'),
+      await readFile(join(seedRoot, 'rooms', roomId, 'room.json'), 'utf8'),
     )
     assert.match(roomSettings.name, /^老闆娘-[a-z0-9]+$/, '沒給名字時 createRoom 會補上隨機尾巴')
     const seededMessages = await seedWs.readRoomMessages('老闆娘', roomId)
@@ -944,7 +1034,7 @@ try {
 
     // 標頭改到了，但訊息一則都不能少。
     const raw = await readFile(
-      join(root, 'sessions-shop', 'chats', '老闆娘', stampedRoom.room, 'chat.jsonl'),
+      join(root, 'sessions-shop', 'rooms', stampedRoom.room, 'chat.jsonl'),
       'utf8',
     )
     const lines = raw.split('\n').filter((line) => line !== '')
@@ -995,7 +1085,7 @@ try {
         { name: '你', isUser: true, text: '再說一次' },
       ])
       const raw = await readFile(
-        join(root, 'sessions-shop', 'chats', '老闆娘', usageRoom.room, 'chat.jsonl'),
+        join(root, 'sessions-shop', 'rooms', usageRoom.room, 'chat.jsonl'),
         'utf8',
       )
       const last = JSON.parse(raw.split('\n').filter((line) => line !== '').pop())
@@ -1015,6 +1105,133 @@ try {
     console.log('13. 對話 ↔ session 對照表 OK — 綁定／解綁／重建／路徑防護／壞檔容錯')
   }
 
+  /* ------------------- 13b. 房間那一側的 session 清單 ---------------------- */
+
+  {
+    const ws = new TavernWorkspace(join(root, 'bindings-shop'))
+    await ws.ensure()
+    const made = await ws.createRoom('老闆娘', '綁定房')
+
+    // 新房間要自己講得出「房主是誰、有哪些 session」——不再只靠路徑那一層。
+    const fresh = await ws.readRoom('老闆娘', made.room)
+    assert.equal(fresh.host, '老闆娘', 'room.json 要有 host')
+    assert.deepEqual(fresh.sessions, {}, '一開始沒有 session')
+    assert.equal(fresh.cast.length, 0, 'cast 空＝只有房主（行為不變）')
+
+    const A = 'session-11111111-1111-4111-8111-111111111111'
+    const B = 'session-22222222-2222-4222-8222-222222222222'
+
+    await ws.bindSession(A, { character: '老闆娘', room: made.room, chat: '綁定房' })
+    let info = await ws.readRoom('老闆娘', made.room)
+    assert.equal(info.sessions['老闆娘'], A, '綁定要寫進房間那一側')
+
+    // 多人房間：同一個房間、兩個成員、兩個 session。
+    await ws.bindSession(B, { character: '酒保', room: made.room, chat: '綁定房' })
+    info = await ws.readRoom('老闆娘', made.room)
+    assert.equal(info.sessions['酒保'], B, '第二個成員也要有自己的')
+    assert.equal(Object.keys(info.sessions).length, 2, '兩個成員兩筆')
+
+    // 解掉一個：只動它自己，另一個留著。
+    await ws.unbindSession(A)
+    info = await ws.readRoom('老闆娘', made.room)
+    assert.equal(info.sessions['老闆娘'], undefined, '解綁要把房間那一筆移除')
+    assert.equal(info.sessions['酒保'], B, '別人的不能被帶走')
+
+    // 索引整包刪掉 → 從 room.json.sessions 重建（不是從標頭，標頭只認房主）。
+    await rm(join(root, 'bindings-shop', '.sessions'), { recursive: true, force: true })
+    const rebuilt = await ws.rebuildSessionBindings()
+    assert.equal(rebuilt, 1, '只剩酒保那一個 session')
+    const recovered = await ws.readSession(B)
+    assert.equal(recovered?.character, '酒保', '重建要指回同一個成員')
+    assert.equal(recovered?.room, made.room, '重建要指回同一間房')
+
+    await rm(join(root, 'bindings-shop'), { recursive: true, force: true })
+    console.log('13b. 房間的 session 清單 OK — host／sessions／一房多成員／重建')
+  }
+
+  /* ------------------- 13c. 舊佈局遷移（chats → rooms） -------------------- */
+
+  {
+    const legacyRoot = join(root, 'legacy-shop')
+    const roomA = 'm0000001-aaaa'
+    const roomB = 'm0000002-bbbb'
+    await mkdir(join(legacyRoot, 'chats', '老闆娘', roomA), { recursive: true })
+    await mkdir(join(legacyRoot, 'chats', '老闆娘', roomB), { recursive: true })
+    await writeFile(
+      join(legacyRoot, 'tavern.json'),
+      JSON.stringify({ version: 1, name: '舊酒館', note: '', createdAt: '', assets: { ['chat:老闆娘/' + roomA]: '店內.png' } }),
+      'utf8',
+    )
+    await writeFile(
+      join(legacyRoot, 'chats', '老闆娘', roomA, 'room.json'),
+      JSON.stringify({ version: 1, name: '舊房 A', cast: [] }),
+      'utf8',
+    )
+    await writeFile(
+      join(legacyRoot, 'chats', '老闆娘', roomB, 'room.json'),
+      JSON.stringify({ version: 1, name: '舊房 B', cast: [] }),
+      'utf8',
+    )
+    await writeFile(
+      join(legacyRoot, 'chats', '老闆娘', roomA, 'chat.jsonl'),
+      JSON.stringify({ chat_metadata: { dsh_session_id: 'session-33333333-3333-4333-8333-333333333333' }, user_name: 'unused', character_name: 'unused' }) + '\n',
+      'utf8',
+    )
+    await mkdir(join(legacyRoot, 'chats', '老闆娘', roomA, 'art'), { recursive: true })
+    await writeFile(join(legacyRoot, 'chats', '老闆娘', roomA, 'art', '店內.png'), pngBytes)
+    await mkdir(join(legacyRoot, '.sessions'), { recursive: true })
+    await writeFile(
+      join(legacyRoot, '.sessions', 'session-33333333-3333-4333-8333-333333333333.json'),
+      JSON.stringify({
+        version: 1,
+        sessionId: 'session-33333333-3333-4333-8333-333333333333',
+        character: '老闆娘',
+        room: roomA,
+        chat: '舊房 A',
+        boundAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      }),
+      'utf8',
+    )
+
+    const ws = new TavernWorkspace(legacyRoot)
+    const moved = await ws.migrateLayout()
+    assert.equal(moved, 2, '兩間房都要搬')
+    assert.equal(existsSync(join(legacyRoot, 'chats')), false, '空的舊角色資料夾要收掉')
+    assert.equal(existsSync(join(legacyRoot, 'rooms', roomA, 'room.json')), true, 'A 搬到 rooms/')
+    assert.equal(existsSync(join(legacyRoot, 'rooms', roomB, 'room.json')), true, 'B 搬到 rooms/')
+    assert.equal(existsSync(join(legacyRoot, 'rooms', roomA, 'art', '店內.png')), true, '插圖跟著房間走')
+
+    const infoA = await ws.readRoom('任何人', roomA)
+    assert.equal(infoA.host, '老闆娘', '舊路徑那一層變成 host')
+    assert.equal(
+      infoA.sessions['老闆娘'],
+      'session-33333333-3333-4333-8333-333333333333',
+      '搬家的同時要把 session 寫進房間那一側',
+    )
+    const infoB = await ws.readRoom('任何人', roomB)
+    assert.equal(infoB.host, '老闆娘', '沒有 session 的房間也要有 host')
+
+    const settings = JSON.parse(await readFile(join(legacyRoot, 'tavern.json'), 'utf8'))
+    assert.equal(settings.layout, 3, 'tavern.json 要升級到 layout 3')
+    assert.equal(settings.assets['chat:' + roomA], '店內.png', '主圖 key 要改成房間 id')
+    assert.equal(settings.assets['chat:老闆娘/' + roomA], undefined, '舊 key 要清掉')
+
+    assert.equal(await ws.migrateLayout(), 0, '第二次是冪等的')
+    assert.equal((await ws.readRoom('酒保', roomA)).name, '舊房 A', '任何角色都讀得到同一間房')
+    assert.equal((await ws.listAllRooms()).length, 2, '清單兩間')
+
+    // 撞號：目的地已存在 → 停下來，不覆蓋。
+    await mkdir(join(legacyRoot, 'chats', '老闆娘', roomA), { recursive: true })
+    await writeFile(join(legacyRoot, 'chats', '老闆娘', roomA, 'room.json'), JSON.stringify({ name: '重複' }), 'utf8')
+    await writeFile(join(legacyRoot, 'tavern.json'), JSON.stringify({ ...settings, layout: 0 }), 'utf8')
+    await assert.rejects(() => ws.migrateLayout(), /撞號/, '撞號要明確失敗')
+    assert.equal((await ws.readRoom('任何人', roomA)).name, '舊房 A', '原本的不能被蓋掉')
+
+    await rm(legacyRoot, { recursive: true, force: true })
+    console.log('13c. 舊佈局遷移 OK — chats → rooms、host／sessions／主圖 key、冪等與撞號')
+  }
+
   /* ------------------------- 14. 刪除對話（不連帶清理） -------------------- */
 
   {
@@ -1028,7 +1245,7 @@ try {
     await ws.stampChatSessionId('老闆娘', dropRoom.room, SID)
 
     // 這間房自己的插圖——**在房間資料夾裡**，不再是 `art/chats/…`。
-    const artDir = join(root, 'delete-shop', 'chats', '老闆娘', dropRoom.room, 'art')
+    const artDir = join(root, 'delete-shop', 'rooms', dropRoom.room, 'art')
     await mkdir(artDir, { recursive: true })
     await writeFile(join(artDir, '場景.png'), 'not really a png')
 
@@ -1050,7 +1267,7 @@ try {
     // 變成孤兒圖。房間的模型是「我把這間房拆了」，所以刪除就是刪除整個房間。
     assert.equal(existsSync(join(artDir, '場景.png')), false, '房間拆了，房裡的插圖也不該留著')
     assert.equal(
-      existsSync(join(root, 'delete-shop', 'chats', '老闆娘', dropRoom.room)),
+      existsSync(join(root, 'delete-shop', 'rooms', dropRoom.room)),
       false,
       '整個房間資料夾都不見了',
     )
@@ -1073,7 +1290,7 @@ try {
     const ws = new TavernWorkspace(join(root, 'messages-shop'))
     await ws.ensure()
     const room = (await ws.createRoom('老闆娘', '夜晚')).room
-    const file = join(root, 'messages-shop', 'chats', '老闆娘', room, 'chat.jsonl')
+    const file = join(root, 'messages-shop', 'rooms', room, 'chat.jsonl')
 
     assert.deepEqual(await ws.readRoomMessages('老闆娘', room), [], '剛開好的房間沒有訊息')
 
@@ -1137,7 +1354,7 @@ try {
     const ws = new TavernWorkspace(join(root, 'media-shop'))
     await ws.ensure()
     const room = (await ws.createRoom('老闆娘', '看圖')).room
-    const file = join(root, 'media-shop', 'chats', '老闆娘', room, 'chat.jsonl')
+    const file = join(root, 'media-shop', 'rooms', room, 'chat.jsonl')
 
     const wrote = await ws.appendRoomMessages('老闆娘', room, [
       {
@@ -1214,7 +1431,7 @@ try {
     const existsFile = (path) => readFile(path).then(() => true, () => false)
 
     // 房裡的插圖（跟著房間走）
-    const artDir = join(root, 'rename-shop', 'chats', '老闆娘', room, 'art')
+    const artDir = join(root, 'rename-shop', 'rooms', room, 'art')
     await mkdir(artDir, { recursive: true })
     await writeFile(join(artDir, '微笑.png'), 'x')
 
@@ -1225,7 +1442,7 @@ try {
     // 1. 資料夾、對話檔、插圖**全部留在原地**
     assert.equal((await ws.readRoom('老闆娘', room)).name, '初次見面', '新名字寫進 room.json')
     assert.equal(
-      await existsFile(join(root, 'rename-shop', 'chats', '老闆娘', room, 'chat.jsonl')),
+      await existsFile(join(root, 'rename-shop', 'rooms', room, 'chat.jsonl')),
       true,
       '對話檔沒有被搬',
     )
@@ -1277,7 +1494,7 @@ try {
 
     // 檔案形狀：`extra.reasoning`，而且**沒有思考的訊息不該長出空的 extra**
     const raw = await readFile(
-      join(root, 'think-shop', 'chats', '老闆娘', room, 'chat.jsonl'),
+      join(root, 'think-shop', 'rooms', room, 'chat.jsonl'),
       'utf8',
     )
     const lines = raw.trim().split('\n')
@@ -1286,7 +1503,7 @@ try {
 
     // 壞行與缺欄位照舊要能讀（既有行為不能被這一條弄壞）
     await writeFile(
-      join(root, 'think-shop', 'chats', '老闆娘', room, 'chat.jsonl'),
+      join(root, 'think-shop', 'rooms', room, 'chat.jsonl'),
       raw + JSON.stringify({ name: 'x', is_user: false, mes: '沒有 extra' }) + '\n{ 壞行\n',
     )
     const survived = await ws.readRoomMessages('老闆娘', room)

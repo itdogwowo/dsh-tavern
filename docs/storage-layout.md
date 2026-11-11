@@ -1,3 +1,8 @@
+> **2.8.0 更新（2026-11-09）**：房間從 `chats/<角色>/<roomId>/` 改成
+> **`rooms/<roomId>/`**（不再有角色層；房主是 `room.json.host`，成員是 `cast`）；
+> 房間資產的 owner 改成房間 id。本頁下面保留 2.3–2.7 的歷史，**最新形狀**以
+> `docs/street-storage-plan.md` §3 為準。
+
 # 儲存佈局（storage layout）
 
 > 狀態：**已實作**（v2.3.0）。本文描述資料在磁碟上的形狀與寫入規則。

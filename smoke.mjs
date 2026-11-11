@@ -3,7 +3,7 @@
  *
  * v2 的宿主半只依賴 `webServer` 一個服務，所以這裡驗的就是那兩條路由：
  *   1. 掛載時註冊了 RPC 與檔案路由（而且 inject 只有 webServer）
- *   2. **新增酒館會在選定的資料夾裡建立結構**（characters/worldbooks/chats/art
+ *   2. **新增酒館會在選定的資料夾裡建立結構**（characters/worldbooks/rooms/art
  *      + tavern.json + README.txt）——這是這個版本唯一會寫入的邏輯
  *   3. 沒有酒館時的操作會給出可行動的錯誤，而不是卡住
  *   4. 酒館街不會自動冒出任何酒館
@@ -276,7 +276,7 @@ function pngCard(entries) {
   assert.equal(added.value.activeId, added.value.added.id, '新增後直接切換過去')
 
   // 這一步就是 v2 的核心：資料夾裡真的多了東西。
-  for (const part of ['characters', 'worldbooks', 'chats', 'art']) {
+  for (const part of ['characters', 'worldbooks', 'rooms', 'art']) {
     assert.equal(existsSync(join(shop, part)), true, `應該建立 ${part}/`)
   }
   assert.equal(existsSync(join(shop, 'tavern.json')), true, '應該建立 tavern.json')
@@ -296,17 +296,17 @@ function pngCard(entries) {
   assert.equal(existsSync(join(shop, 'worldbooks', '酒館.json')), true, '應該附一本世界書')
   assert.equal(existsSync(join(shop, 'worldbooks', '輸出格式.json')), true, '應該附輸出格式（預設，不是選配）')
   // 房間的 id 是隨機的 → 先挑出來，其餘照順序比對。
-  const seededRoom = added.value.skeleton.filter((item) => /^chats\//.test(item))
+  const seededRoom = added.value.skeleton.filter((item) => /^rooms\//.test(item))
   assert.equal(seededRoom.length, 1, '新酒館要附一間可以直接聊的房間：' + added.value.skeleton.join(' '))
-  assert.match(seededRoom[0], /^chats\/老闆娘\/[a-z0-9]+-[a-z0-9]+\/chat\.jsonl$/, seededRoom[0])
+  assert.match(seededRoom[0], /^rooms\/[a-z0-9]+-[a-z0-9]+\/chat\.jsonl$/, seededRoom[0])
   assert.deepEqual(
-    added.value.skeleton.filter((item) => !/^chats\//.test(item)).sort(),
+    added.value.skeleton.filter((item) => !/^rooms\//.test(item)).sort(),
     ['characters/老闆娘.png', 'custom.css', 'worldbooks/輸出格式.json', 'worldbooks/酒館.json'],
     'skeleton 要回報實際建立了什麼：' + added.value.skeleton.join(' '),
   )
   // 預設房間裡要有開場白（卡片的 first_mes），不然「可以直接聊」是假的。
-  const roomId = seededRoom[0].split('/')[2]
-  const seededChat = readFileSync(join(shop, 'chats', '老闆娘', roomId, 'chat.jsonl'), 'utf8')
+  const roomId = seededRoom[0].split('/')[1]
+  const seededChat = readFileSync(join(shop, 'rooms', roomId, 'chat.jsonl'), 'utf8')
   assert.match(seededChat, /銅鈴/, '預設房間要有一則開場白（老闆娘的 first_mes）')
   // 預設角色的圖就是那張卡片本身：`character.list` 要把它當成主圖回報（頭像、海報牆靠它）。
   const seededCards = (await callRpc('character.list', {})).value
@@ -342,6 +342,40 @@ function pngCard(entries) {
   console.log('4b. 重複加入 OK — 只切換，不重複建立')
 }
 
+/* --- 4c. 街頁卡片：一間酒館一張卡，附計數與最近房間 ------------------------ */
+{
+  const cards = await callRpc('street.cards')
+  assert.equal(cards.ok, true, '街頁要讀得到：' + cards.error)
+  assert.equal(cards.value.cards.length, 1, '只有一間酒館')
+  const card = cards.value.cards[0]
+  assert.equal(card.active, true, '剛新增的酒館是目前的')
+  assert.equal(card.exists, true)
+  assert.equal(card.counts.characters, 1, '一張老闆娘')
+  assert.equal(card.counts.worldbooks, 2, '兩本預設世界書')
+  assert.equal(card.counts.chats, 1, '一間預設房')
+  assert.equal(card.rooms.length, 1, '要回最近一間房')
+  assert.ok(card.rooms[0].name.includes('老闆娘'), '最近房間要有名字：' + card.rooms[0].name)
+  // 店面：招牌＋這間酒館 theme 的色盤（street.cards 一次回，避免 N 間店打 N 次）。
+  assert.ok(card.shop !== undefined && card.shop !== null, '卡片要帶店面')
+  assert.equal(card.shop.signStyle, 'hanging', '預設吊牌')
+  assert.equal(typeof card.shop.palette.accent, 'string', '店面要有主題強調色')
+  assert.equal(card.shop.palette.accent.length > 0, true)
+  const shopRead = await callRpc('shop.read', { id: card.id })
+  assert.equal(shopRead.ok, true, 'shop.read 要成功：' + shopRead.error)
+  assert.equal(shopRead.value.exists, false, '還沒寫過店面')
+  const shopSaved = await callRpc('shop.write', {
+    id: card.id,
+    patch: { sign: '測試店', tagline: '有酒', signStyle: 'projecting', facade: 'noren', awning: 'none', lantern: 'cool', frame: 'break', frameShape: 'arch', roof: 'eaves' },
+  })
+  assert.equal(shopSaved.ok, true, 'shop.write 要成功：' + shopSaved.error)
+  assert.equal(shopSaved.value.shop.sign, '測試店')
+  assert.equal(shopSaved.value.shop.frame, 'break')
+  assert.equal(shopSaved.value.shop.frameShape, 'arch')
+  const shopReread = await callRpc('shop.read', { id: card.id })
+  assert.equal(shopReread.value.shop.facade, 'noren', '店面要讀得回來')
+  console.log('4c. 街頁 OK — 卡片帶計數、最近房間、招牌與主題色盤')
+}
+
 /* --- 5. 檔案 API --------------------------------------------------------- */
 {
   const listed = await callRpc('character.list')
@@ -367,17 +401,17 @@ function pngCard(entries) {
 
   const chat = await callRpc('room.create', { character: '測試角色', name: '初次見面' })
   assert.equal(chat.ok, true, '開新對話應該成功：' + chat.error)
-  // 房間＝一個資料夾（`chats/<角色>/<roomId>/`），**身分是 id、不是名字**
+  // 房間＝一個資料夾（`rooms/<roomId>/`），**身分是 id、不是名字**
   // ——那正是這個佈局的目的（改名不用搬任何東西）。見 docs/room-layout.md。
   assert.equal(typeof chat.value.room, 'string', '建立要回房間 id')
   assert.equal(chat.value.name, '初次見面', '顯示名稱是使用者給的那個')
   assert.equal(
-    existsSync(join(shop, 'chats', '測試角色', chat.value.room, 'chat.jsonl')),
+    existsSync(join(shop, 'rooms', chat.value.room, 'chat.jsonl')),
     true,
     '對話檔在房間資料夾裡',
   )
   assert.equal(
-    existsSync(join(shop, 'chats', '測試角色', chat.value.room, 'room.json')),
+    existsSync(join(shop, 'rooms', chat.value.room, 'room.json')),
     true,
     '房間設定檔也在',
   )
@@ -592,15 +626,19 @@ function pngCard(entries) {
 
 /* --- 9. 房間與店面的插圖 --------------------------------------------------- */
 {
-  // 房間的圖**跟著房間走**：`chats/<角色>/<roomId>/art/`（**不在 `art/` 底下**）。
+  // 房間的圖**跟著房間走**：`rooms/<roomId>/art/`（**不在 `art/` 底下**）。
   // 所以 owner 要用**房間 id**，不是顯示名稱——名稱不是身分。
   const rooms = await callRpc('room.list')
   const roomId = rooms.value[0].room
-  const chatOwner = '測試角色/' + roomId
+  // 2.8：owner 就是房間 id。舊的 `角色/roomId` 仍然收（下面補一條相容測試）。
+  const chatOwner = roomId
 
   const chatAssets = await callRpc('assets.list', { kind: 'chat', owner: chatOwner })
   assert.equal(chatAssets.ok, true, '房間的插圖應該可以讀：' + chatAssets.error)
   assert.equal(chatAssets.value.owner, chatOwner)
+  const legacyAssets = await callRpc('assets.list', { kind: 'chat', owner: '測試角色/' + roomId })
+  assert.equal(legacyAssets.ok, true, '舊的「角色/roomId」也要讀得到')
+  assert.equal(legacyAssets.value.owner, roomId, '回來的 owner 一律是房間 id')
 
   const chatUpload = await callRpc('assets.write', pngBytes(4), {
     query:
@@ -608,22 +646,20 @@ function pngCard(entries) {
   })
   assert.equal(chatUpload.ok, true, '房間的插圖應該可以上傳：' + chatUpload.error)
   assert.equal(
-    existsSync(join(shop, 'chats', '測試角色', roomId, 'art', '房間.png')),
+    existsSync(join(shop, 'rooms', roomId, 'art', '房間.png')),
     true,
     '圖要落在房間資料夾裡',
   )
 
   // 對話清單的每一筆現在是一間**房**：`room` 是身分（資料夾名），`name` 是顯示名稱。
   //
-  // ⚠️ 房間的插圖在房間資料夾裡（`chats/<角色>/<roomId>/art/`），所以舊的
+  // ⚠️ 房間的插圖在房間資料夾裡（`rooms/<roomId>/art/`），所以舊的
   // `art/chats/<assetId>/` 那條路會在客戶端切過去（階段 4b）之後一起換掉——
   // 這一條先釘「清單帶得出身分」。
   const chats = await callRpc('room.list')
   assert.equal(typeof chats.value[0].room, 'string', '清單要帶房間 id')
   assert.equal(chats.value[0].name, '初次見面', '顯示名稱是使用者給的那個')
-  // ⚠️ `assetId` 現在仍然由**顯示名稱**那條舊規則正規化而來，而且插圖還在上傳到
-  // `art/chats/...`（上一條斷言釘的就是那裡）。房間的圖搬進房間資料夾之後，
-  // 這個欄位會整個拿掉——那時連同這一條一起刪。
+  // 2.8：`assetId` 就是房間 id 的正規化結果（不再是顯示名稱）。
 
   const shopFront = await callRpc('assets.write', pngBytes(12), {
     query: '&kind=tavern&name=' + encodeURIComponent('店面.png'),
@@ -634,7 +670,7 @@ function pngCard(entries) {
   assert.equal(shopFront.value.owner, '這間酒館')
 
   const summary = await callRpc('workspace')
-  // 回到 4：房間的圖在 `chats/<角色>/<roomId>/art/`，**不在 `art/` 底下**，
+  // 回到 4：房間的圖在 `rooms/<roomId>/art/`，**不在 `art/` 底下**，
   // 所以計數現在**兩邊都掃**（`countArt` ＋ `countRoomArt`）——
   // 2.6.6 剛上線時只掃 `art/`，這裡的數字曾經掉到 3。
   //
@@ -738,15 +774,15 @@ function pngCard(entries) {
   assert.notEqual(displayName, made.value.room, '⚠️ 這兩個值本來就不一樣，測試才驗得出東西')
   assert.equal(bound.value.stamped, true, '順手要把 session id 蓋進對話檔的標頭（用房間 id 蓋）')
   // 蓋進去的東西要真的在檔案裡——`stamped: true` 只是回報，這才是事實。
-  const header = JSON.parse(readFileSync(join(sessionShop, 'chats', '老闆娘', made.value.room, 'chat.jsonl'), 'utf8').split('\n')[0])
+  const header = JSON.parse(readFileSync(join(sessionShop, 'rooms', made.value.room, 'chat.jsonl'), 'utf8').split('\n')[0])
   assert.equal(
     header.chat_metadata?.dsh_session_id,
     SID,
     '⚠️ 對話檔的標頭要真的有 dsh_session_id（`session.rebuild` 靠它重建索引）',
   )
-  // agent 面讀每房設定的那一條路：`chats/<角色>/<room>/room.json` 必須真的存在。
+  // agent 面讀每房設定的那一條路：`rooms/<room>/room.json` 必須真的存在。
   assert.equal(
-    existsSync(join(sessionShop, 'chats', '老闆娘', bound.value.room, 'room.json')),
+    existsSync(join(sessionShop, 'rooms', bound.value.room, 'room.json')),
     true,
     '⚠️ 綁定的 room 要指到真的資料夾，不然每房設定永遠讀不到',
   )
@@ -850,7 +886,7 @@ function pngCard(entries) {
   writeFileSync(projCacheFile, '{}')
 
   // 先在那間房裡放一張圖與一個附件（重建不出來的那兩種東西）
-  const roomDir = join(deleteShop, 'chats', '老闆娘', made.value.room)
+  const roomDir = join(deleteShop, 'rooms', made.value.room)
   mkdirSync(join(roomDir, 'art'), { recursive: true })
   writeFileSync(join(roomDir, 'art', '店內.png'), 'fake-image-bytes')
   mkdirSync(join(roomDir, 'files'), { recursive: true })
@@ -938,7 +974,7 @@ function pngCard(entries) {
   const missing = await callRpc('room.delete', { character: '老闆娘', room: '不存在' })
   assert.equal(missing.ok, false, '刪不存在的對話要失敗')
   assert.match(String(missing.error), /找不到這間房/, '錯誤訊息要可行動：' + missing.error)
-  assert.match(String(missing.error), /chats\//, '訊息要指出是哪個路徑：' + missing.error)
+  assert.match(String(missing.error), /rooms\//, '訊息要指出是哪個路徑：' + missing.error)
 
   await callRpc('tavern.remove', { id: 'delete-shop' })
   rmSync(deleteShop, { recursive: true, force: true })
@@ -972,11 +1008,11 @@ function pngCard(entries) {
   const wroteNote = await callRpc('file.write', note, { query: query('筆記.txt') })
   assert.equal(wroteNote.ok, true, 'file.write 應該存在而且成功：' + wroteNote.error)
   assert.equal(
-    existsSync(join(attachShop, 'chats', '老闆娘', room, 'files', '筆記.txt')),
+    existsSync(join(attachShop, 'rooms', room, 'files', '筆記.txt')),
     true,
     '附件要落在房間的 files/ 底下',
   )
-  assert.equal(readFileSync(join(attachShop, 'chats', '老闆娘', room, 'files', '筆記.txt'), 'utf8'), note.toString('utf8'), '位元組要原樣')
+  assert.equal(readFileSync(join(attachShop, 'rooms', room, 'files', '筆記.txt'), 'utf8'), note.toString('utf8'), '位元組要原樣')
   assert.match(wroteNote.value.url, /^\/api\/dsh-tavern\/files\//, '要回可以直接串的 URL')
 
   // 2. 圖片也走同一條路（附件不分種類），清單要認得出它是圖片
@@ -1054,7 +1090,7 @@ function pngCard(entries) {
   // 8. 刪除（明確實體刪除，跟插圖同一個哲學：不自動清理孤兒）
   const deleted = await callRpc('file.delete', { character: '老闆娘', room: room, name: '筆記-2.txt' })
   assert.equal(deleted.ok, true, deleted.error)
-  assert.equal(existsSync(join(attachShop, 'chats', '老闆娘', room, 'files', '筆記-2.txt')), false)
+  assert.equal(existsSync(join(attachShop, 'rooms', room, 'files', '筆記-2.txt')), false)
   const after = await callRpc('file.list', { character: '老闆娘', room: room })
   assert.equal(after.value.length, 3, '剩下的三份（txt ＋ png ＋ svg）還在')
 
@@ -1468,7 +1504,7 @@ function pngCard(entries) {
   assert.equal(oneRun.value.lines.length, 2)
   assert.equal(oneRun.value.lines[0].out, '（她抬頭）', '內容要活得過 JSON 這一圈')
   assert.equal(
-    existsSync(join(flowShop, 'chats', '老闆娘', roomId, 'runs', 'run-1.jsonl')),
+    existsSync(join(flowShop, 'rooms', roomId, 'runs', 'run-1.jsonl')),
     true,
     '⚠️ 執行紀錄住在房間資料夾裡（跟著這一間房走，不是 ~/.dsh）',
   )
@@ -2351,7 +2387,7 @@ function pngCard(entries) {
   for (const chat of [first, second, third]) {
     assert.equal(chat.value.name, '初次見面', '顯示名稱同名是允許的（名字不是身分）')
     assert.equal(
-      existsSync(join(shop3, 'chats', '碰撞角色', chat.value.room, 'chat.jsonl')),
+      existsSync(join(shop3, 'rooms', chat.value.room, 'chat.jsonl')),
       true,
       `對話檔要真的存在：${chat.value.room}/chat.jsonl`,
     )
@@ -2389,13 +2425,13 @@ function pngCard(entries) {
   )
   for (const id of raceIds) {
     assert.equal(
-      existsSync(join(shop3, 'chats', '碰撞角色', id, 'chat.jsonl')),
+      existsSync(join(shop3, 'rooms', id, 'chat.jsonl')),
       true,
       `每一間房都要有對話檔：${id}`,
     )
   }
-  const raceDirs = readdirSync(join(shop3, 'chats', '碰撞角色'))
-  assert.equal(raceDirs.length, 7, '先前三間 ＋ 這次四間，總共七個房間資料夾')
+  const raceDirs = readdirSync(join(shop3, 'rooms'))
+  assert.equal(raceDirs.length, 8, '先前三間 ＋ 這次四間 ＋ 新增酒館附的那一間，總共八個房間資料夾')
 
   rmSync(shop3, { recursive: true, force: true })
   console.log('18. 碰撞重試 OK — 對話與插圖撞名自動編號，併發建立不會有兩個同名')

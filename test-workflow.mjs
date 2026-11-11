@@ -411,7 +411,7 @@ import { RUN_KEEP, SUBDIRS, TavernWorkspace, defaultRoom, membersOf } from './li
     assert.equal(summary.at, '2026-09-28T10:00:00.000Z', '時間軸的第一個時間＝這一輪的開始')
 
     // 壞掉的行要跳過但**要說**（安靜地少幾行比壞掉更糟）
-    writeFileSync(join(root, 'chats', '老闆娘', roomId, 'runs', 'run-a.jsonl'), '{ 壞行\n', { flag: 'a' })
+    writeFileSync(join(root, 'rooms', roomId, 'runs', 'run-a.jsonl'), '{ 壞行\n', { flag: 'a' })
     const withBroken = await ws.readRun('老闆娘', roomId, 'run-a')
     assert.equal(withBroken.lines.length, 3, '壞掉的行不進 lines')
     assert.equal(withBroken.broken, 1, '但要回報有幾行壞掉')

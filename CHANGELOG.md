@@ -2,6 +2,448 @@
 
 版本號照 [Semantic Versioning](https://semver.org/lang/zh-TW/)。
 
+## 2.13.0 — 更多可以調的店面元素：邊框形狀、屋簷、植物、窗與門
+
+使用者：
+
+> 很接近，最好多幾個元素可以這樣調整，然後就是邊框形狀這些也應該是可以調整的。
+
+### `shop.json` 多五個欄位
+
+| 欄位 | 值 | 預設 | 意思 |
+|---|---|---|---|
+| `frameShape` | `rounded`／`sharp`／`arch`／`soft` | `rounded` | 卡片邊框：圓角／方角／拱頂／大圓。 |
+| `roof` | `none`／`eaves` | `none` | 店頂加一道伸出的屋簷。 |
+| `plant` | `none`／`pot`／`bush` | `none` | 門口植物：一盆／一叢。 |
+| `windows` | `cross`／`plain`／`none` | `cross` | 十字窗／素面窗／不要窗。 |
+| `door` | `arch`／`square` | `arch` | 拱門／方門。 |
+
+- **邊框形狀**會同時套到卡片與店面裁切（`data-shape`）；拱頂的上面兩角是
+  `--tv-street-radius-arch`，不會出現「卡片圓、圖不圓」的缺口。
+- **屋簷**、**植物**畫在裁切層外面，所以只有 `frame: "break"` 的卡可以伸出卡外；
+  規矩卡會被卡框收回。招牌、屋簷、植物可以各自破框，不一定要一起。
+- **窗與門**在店內，不會破框；只改變店面的樣子。
+
+### UI
+
+⚙️ 設定 → 🏮 店面 多了：**邊框形狀、屋簷、門口植物、窗戶、門**。
+所有欄位一樣走 `shop.write` 整份寫入；顏色仍然跟 `theme.json`。
+
+### 測試／文件
+
+- `lib/shop.js` 五個欄位的列舉與預設；`test-workspace` 2c 驗預設、寫入、打錯落回。
+- `test-client` 的店面 seed 加 `arch`／`eaves`／`bush`／`plain`／`square`，
+  驗 `data-shape`／`data-roof`／`data-plant`／`data-windows`／`data-door`；
+  `ShopSettings` 驗完整 patch。
+- `docs/shop.md` 更新欄位表與 UI；`README` 補一句。
+- 宿主與 client 都改了；**要重啟一次**，再硬重新整理。
+
+---
+
+## 2.12.0 — 破框：規矩是常態，少數店可以越界
+
+使用者：
+
+> 太規矩了、太規定了。正常情況或者我期待的樣子是有些招牌會跨界越界，
+> 就像某些遊戲卡片一樣：有一個明確的規限，但一些特殊的卡片為了突顯特色
+> 會做一些超越界限的 UI。現在這種限制就讓風格太死板，並沒有熱鬧繽紛的感覺。
+
+### 框架：`frame`
+
+`shop.json` 多一個欄位：
+
+```json
+{ "frame": "normal" }
+```
+
+| 值 | 意思 |
+|---|---|
+| `normal`（預設） | 招牌留在卡片邊界內；卡片排得整齊。 |
+| `break` | 卡片 `overflow` 打開，招牌可以伸出卡外；卡片微微旋轉 −0.6°，hover 回正。 |
+
+**只有那張卡破框**。街道骨架、路面、彩旗、其他卡仍然守規矩——先有框架，破框才
+看得出來。UI：⚙️ 設定 → 🏮 店面 → **框架（規矩／越界）**；只建議少數店用。
+
+### 新的招牌樣式
+
+- `projecting`（伸向街道）：招牌從店側伸出去，附一根小支架；左邊的店往右伸、
+  右邊的店往左伸。需要 `frame: "break"` 才不會被卡片裁掉。
+- `marquee`（橫跨店頂）：招牌橫過整個店頂，左右各伸出 6%；同樣需要 `frame: "break"`。
+
+### 街道：彩旗與更活的節奏
+
+- 路口多一串**彩旗**（`.dsh-tv-streetBunting`）：顏色直接取每間店的 `accent`，
+  不是另一套固定色；窄螢幕收起。
+- 破框卡 hover 時 z-index 提高，招牌可以壓過鄰卡／路面；平常規矩卡不會。
+- 卡片前面多一層 `.dsh-tv-shopClip`：牆／圖／門／窗／遮陽棚在裡面裁圓角；
+  **招牌與燈籠在外面**，所以破框時不會被圓角或 overflow 切掉。
+- 街頁 `overflow-x:hidden`（`overflow-y:auto` 不變），破框招牌不會讓整頁長出橫向捲軸。
+
+### 測試／文件
+
+- `lib/shop.js`：`frame`、`projecting`、`marquee` 的驗證；`test-workspace` 補預設與
+  寫入（含打錯的值落回 `normal`）。
+- `test-client`：破框卡的 `data-frame`／`data-sign`、彩旗數量與顏色、`ShopSettings`
+  的 frame 儲存。
+- `docs/shop.md` 加「破框」一節；`design-language.md` §0.0 註明「破框是幾何例外，
+  不是顏色例外」。
+- 宿主改了 `shop` 的正規化（新欄位）；**要重啟一次**，再硬重新整理。
+
+---
+
+## 2.11.0 — 每間店有自己的店面：`shop.json`、招牌與店面樣式
+
+使用者：
+
+> 顏色問題所以並沒有很好地呈現，而且店舖也很死板，並沒有呈現到內部的裝修風格，
+> 讓酒館各有特色。這部份可能你也要設計個框架，讓這些文件夾能夠自定義自己的面板招牌。
+
+### 三層，分清楚
+
+| 層 | 決定什麼 | 誰決定 |
+|---|---|---|
+| 街道 | 牌坊、路面、卡框、按鈕 | **DSH 原生** |
+| 店面 | 招牌、牆、門、窗、遮陽棚、燈籠、店面圖 | 這間酒館的 **`theme.json` 色盤** ＋ `shop.json` |
+| 室內 | 大廳／房間的 UI | 這間酒館的 `theme.json` |
+
+店面卡的下半（名字、計數、按鈕）維持 DSH 的閱讀層；**上半的店**吃這間酒館的
+theme 色盤。所以「墨藍」那間店在街上會是藍灰的店面，而不是全部店都同一個顏色。
+
+### 店面（`shop.json`）
+
+新增 `lib/shop.js`（純資料／驗證）＋ `<酒館>/shop.json`：
+
+```json
+{
+  "version": 1,
+  "sign": "醉月樓",
+  "tagline": "今夜有酒，也有故事。",
+  "signStyle": "plaque",
+  "facade": "noren",
+  "awning": "solid",
+  "lantern": "cool"
+}
+```
+
+- `sign`：招牌字（留空＝酒館名稱）；`tagline`：一句話。
+- `signStyle`：`hanging`（吊牌）／`plaque`（門楣）／`banner`（店側）。
+- `facade`：`classic`（門＋兩窗）／`noren`（暖簾）／`counter`（開放櫃檯）。
+- `awning`：`stripes`／`solid`／`none`；`lantern`：`warm`／`cool`／`none`。
+- 沒有檔案是正常的；壞檔回預設但 `broken: true`；不認得的 key 丟掉；長度／控制
+  字元在宿主收斂。詳細：[docs/shop.md](docs/shop.md)。
+
+宿主：`shop.read`／`shop.write`；`street.cards` 每張卡多一個
+`shop`（含 `palette`：從 `theme.json` 算好的 accent／surface／text／line／glow）。
+`palette` 一次回，街不必為每間店再打一次 `theme.read`。
+
+### 店面長什麼樣
+
+- 沒有店面圖：用 CSS 畫**牆、門（拱形）、兩扇窗、遮陽棚、招牌、燈籠**；
+  `noren` 加門簾、`counter` 改成櫃檯。
+- 有店面圖：圖就是牆，門／窗／櫃檯藏起來；招牌、遮陽棚、燈籠疊在圖上。
+- 招牌吃 `--shop-surface`／`--shop-text`／`--shop-accent`；遮陽棚吃
+  `--shop-accent-soft`；燈籠暖色用 `glow`、冷色用 `accent`。
+- 左右錯位、路面、牌坊維持 2.10.1；店舖比例不變（330／112）。
+- 店面卡的文字（名字／tagline／計數）維持街道的 DSH 色，只有「店」是酒館色。
+
+### UI：⚙️ 設定 → 🏮 店面
+
+酒館設定多一區「店面（街上看到的那張臉）」：
+
+- 招牌字、一句話；
+- 招牌樣式、店面樣式、遮陽棚、門邊的燈；
+- 「儲存店面」寫 `shop.json`。
+
+顏色仍然在**房間的 ⚙️ 房間 → 🎨 這間酒館的外觀**（2.10.0 的五個 preset）；
+店面會跟著變，街道不會。
+
+### 測試
+
+- `test-workspace` 2c：`shop.json` 預設、寫入、壞檔、未知 key、長度／列舉收斂。
+- `smoke` 4c：`street.cards` 帶 `shop` 與 `palette`；`shop.read`／`shop.write` 契約。
+- `test-client`：店面 seed（招牌／tagline／data-*／`--shop-accent`）、沒有 shop 的
+  預設 fallback、`ShopSettings` 儲存送出的完整 patch。
+- 版本 2.11.0；**宿主多了 `shop.read`／`shop.write`，要重啟一次**（店面卡才有
+  `shop.palette`；硬重新整理只會有預設樣式）。
+
+---
+
+## 2.10.1 — 把街道還給街道；店舖收小、可捲動
+
+使用者：
+
+> 滾動呢？街道呢？店舖太大了，把街道完全佔據了，變成一個分隔線，不夠明顯的街道感。
+
+### 街的比例
+
+- **卡片收小**：店面卡最大寬度 `440 → 330`、店面高度 `136 → 104`、店招
+  `66 → 56`、內文與按鈕一起收；一間店不再佔掉半條街。
+- **街道變寬**：兩欄間距 `88px → clamp(150px, 19vw, 250px)`，中間不是一條
+  2px 虛線，而是一條**有路緣、鋪面、中線的路**：
+  - `.dsh-tv-streetRoad`：寬 `clamp(110px, 14vw, 200px)`，左右各一條路緣；
+  - 鋪面用低對比的點狀紋理（DSH 的 line token，不是貼圖）；
+  - 中間一條虛線；兩側留出人行道，店舖的內側對齊街道。
+- **街尾的新增**：從 180px 的大卡改成 **一條約 56px 的虛線膠囊**「新增酒館」，
+  不再把頁面拉長；上方牌坊的「＋ 新增酒館」仍然是主要入口。
+- **左右錯位**：右邊的店往下錯開 28px（窄螢幕取消），街道不會像表格。
+- **窄螢幕**：`900px` 以下牌坊的按鈕先收到下面；`820px` 以下改成單欄，
+  街道變成**左側 16px 的路面**（不是消失），卡片沿著路邊排。
+- **牌坊收斂**：高度 `132 → 118`，街招 padding／字級跟著收，讓第一排店
+  更快出現在視窗裡。
+
+### 滾動
+
+- `.dsh-tv-streetPage` 現在是 **`height:100%; overflow-y:auto`** 的捲動容器
+  （`overscroll-behavior:contain`）。主面板高度不是無限的；店舖變多或視窗變矮時，
+  街可以自己捲，不再被切掉。
+- 骨架卡高度 `250 → 190`，載入時不會先撐出一大塊空白。
+
+### 測試
+
+- `test-client.mjs`：街的容器現在是「兩間店＋一條街」（3 個 child）；
+  新增 `dsh-tv-streetRoad` 的存在斷言與「街頁要 `overflow-y:auto`」的斷言。
+- 沒有資料變更；client-only，**硬重新整理**即可。牌坊／店面的主機欄位若還沒
+  重啟過宿主（2.8/2.9），照舊要重啟一次才會有 `front` 店面圖。
+
+---
+
+## 2.10.0 — 街門（牌坊）、左右店面、街跟 DSH；換色搬進房間
+
+使用者：
+
+> 入口有一座牌坊，然後店舖一左一右，現在只是一個簡單的列表就沒有那麼好的感覺。
+> 配色也要再處理……我是希望進去房間後才處理的。現在元件的顏色盡量貼合 DSH，
+> 酒館的裝修也應該是可以調整的，不過街道就盡量貼合 DSH。
+
+### 街：一條有門的街
+
+- **入口牌坊**：`酒館街` 街招掛在牌坊正中央（`dsh-tv-paifang`），屋頂／橫樑／
+  兩柱／兩盞燈都是 CSS 畫的，沒有貼圖。街招上的字才是 `h2`（牌坊結構
+  `aria-hidden`），讀屏不會讀到一堆裝飾。
+- **店面一左一右**：`dsh-tv-streetAvenue` 是兩欄網格，卡片照 DOM 順序輪流放左右，
+  中間一條虛線是街道。窄螢幕自動收成單欄；DOM 順序不變（Tab 與讀屏照原順序）。
+- **「新增酒館」移到街尾**：像街底的一塊新地，不再跟店面搶位置。
+- **街招下的一行**：`N 間酒館・目前：…`，然後才是說明；說明置中、最多 560px。
+
+### 顏色：街道跟 DSH，房間才是酒館的
+
+- **街的 CSS 不再用 `--dsh-tv-*`**（那是酒館 theme）。街先把 DSH 原生
+  `--dsw-alias-*` 收斂成 `--tv-street-*`（表面、文字、線、brand、danger、
+  `--dsw-radius-*`、`--dsw-shadow-lv3`），所有街的規則只碰這一組。
+- **街不再呼叫 `ensureTheme`**：從酒館回到街，街不會被上一間酒館的色盤染色。
+  主題在 `openTavern`／`continueTavern` 進酒館時才讀。
+- **街上的按鈕也走 DSH**：`MapBtn` 在 `.dsh-tv-streetPage` 底下被覆寫成
+  DSH 的 primary／border／label 色；`IconShopSign`（店招）與 `IconStreetMark`
+  （空街的牌坊）是 `currentColor`，不再借用酒館主題的燈籠。
+- **酒館區不動**：大廳／包廂／卡司／藏書／房間照舊吃 `theme.json`。
+
+### 換色：進房間之後
+
+- 對話頁的 **⚙️ 房間** 分頁最下面多一塊 **「🎨 這間酒館的外觀」**：
+  `暖燈`／`墨藍`／`森林`／`紙白`／`夜紫` 五個 preset，按一下
+  `theme.write`（整份 `{ base, tokens, style }`），再 `theme.read` 重新套用。
+- preset 是**酒館主題**，不是街的皮膚；套用到這間酒館的所有房間。`custom.css`
+  仍然是最後一層。按鈕有 `aria-pressed`、`focus-visible`，切換中停用。
+- 這一塊放在房間裡是刻意的：使用者「進去房間後才處理」；街是 DSH 的導航。
+
+### 測試與文件
+
+- `test-client.mjs`：街頁加牌坊／街招／街道容器（兩張卡都在街上）的斷言；
+  新增「房間快捷換色」：五個 preset、按「墨藍」會送 `theme.write` 的
+  `base`／`tokens`；token 分區掃改成 **DSH 區（側邊欄＋街）vs 酒館區**，
+  並釘住街的 `--tv-street-* ← --dsw-*` 收斂。
+- `design-language.md` §0.0 從「兩個區」改成「兩個規矩、三個區」：街在 main
+  面板，但屬於 DSH 導航區；新增「換色在哪裡按」。
+- 沒有資料遷移；這一版是 client（加大廳/房間的 UI）＋測試／文件。
+  **街的牌坊/左右店面/DSH 顏色是 client 變更，硬重新整理即可；`theme.write`
+  是既有宿主 op，不需要為換色重啟。**
+
+---
+
+## 2.9.0 — 酒館街的店面卡（P5）
+
+使用者：
+
+> UI 上可不可以「街」多一點點？
+
+街頁從「一排功能卡」變成街道：**店面圖／遮陽棚／街招／計數／最近一間房**。
+
+### 這一版做了什麼
+
+| | |
+|---|---|
+| **街招** | `酒館街` ＋ 一句「今晚想在哪一間坐下？」；暖光暈、細底線；載入完成後一行 `N 間酒館・目前：…`。 |
+| **店面卡** | 卡片上半是店面：有 `art/tavern/` 的主圖就當橫幅（`street.cards` 新回傳 `front`），沒有就畫遮陽棚＋燈籠／圖示；右上角「目前」；下半是名字、路徑、`N 張卡／N 本書／N 間房`、最近一間房。 |
+| **統計改成文字 chip** | 不再用 🎭／📖／💬 當結構圖示（emoji 只留給使用者自己選的酒館圖示）；文字在深淺色都比較穩。 |
+| **載入／空街** | 載入時三張骨架卡（`aria-busy`／`role=status`），不是一句「讀取中」；空街是燈籠＋說明＋一顆「選一個資料夾，開第一間酒館」。 |
+| **可及性** | 卡片主體與「新增酒館」有 `:focus-visible` 外框；`MapBtn` 也補上；`prefers-reduced-motion` 關掉 hover 位移與 shimmer；窄螢幕單欄。 |
+| **對比** | 路徑從 text-3 提到 text-2（11px 小字在淺色主題下也讀得到）。 |
+| **測試** | 街頁測試改驗新的統計文字與「最近」；CSS 重複 class 的圍籬照舊（media query 用 `.dsh-tv-streetPage .xxx` 前綴，避免被當成同一個 class 定義兩次）。 |
+
+### 沒動到的
+
+- 房東、插件分頁、燈籠、`main:tavern-street` 的導航不變；這一版只動街頁的外觀與 `street.cards` 多一個 `front`。
+- 店面圖是**酒館的主圖**（`art/tavern/` 裡 `tavern.json` 指定的那一張，沒有就第一張）；沒有圖也不會壞，遮陽棚就是預設店面。
+
+---
+
+## 2.8.0 — 酒館街搬進插件、房間改成 `rooms/<roomId>/`
+
+使用者：
+
+> 點擊進去先進入街道後才進入酒館，街道可以建立很多酒館。
+> 燈籠留着當快捷入口。……對話儲存在哪裏怎樣區分，你再計劃一下，現在的做法好像有點怪怪的。
+
+以及：
+
+> 順便把以前的左下角的位置也移除了，不需要了。
+
+這一版把「酒館街」從側邊欄搬走，也把房間的儲存佈局重做了一次。
+
+### 街：插件頁的分頁 ＋ 燈籠捷徑
+
+```
+插件頁 →「酒館街」分頁 ─┐
+                        ├→ 街（酒館卡片）→ 酒館 → 房間
+燈籠（sidebar.panellist）┘
+```
+
+- **`main:tavern-street`**：街是真正的主面板（`TavernStreetPage`），卡片＝酒館，
+  「＋」＝選資料夾開一間，「繼續」＝直接開最近一間房。
+- **`plugins.tab`**：插件頁多一個官方分頁「酒館街」（`id: tavern-street`,
+  `order: 100`）。官方的「發現」也是用這個座位——不接管任何 single 座位。
+- **燈籠**：`sidebar.panellist` 的 `id` 改成 `tavern-street`（按下去是街）。
+- **酒館頁／對話頁加了「上一層」**：`← 酒館街`、`← 酒館`。側邊欄那棵樹收掉之後，
+  導航必須畫在頁面上。
+- **舊的左下角整組拿掉**：`sidebar.workspaces` 的接管、`TavernSidebarRegion`、
+  子座位鏡射、拖曳分隔線、高度記憶全部刪除。側邊欄回到原生工作區。
+  （2.7.2 為了解決「退位」而做的五個子座位鏡射，也隨著接管一起刪掉；那個 bug
+  的記錄留在 2.7.2，程式不再需要它。）
+- **新宿主 op `street.cards`**：一次回每間酒館的計數＋最近三間房（避免 N 間酒館
+  打 N 次 `room.list`）。舊宿主沒有這個 op 時，客戶端退回 `tavern.list`。
+
+### 儲存：房間搬到 `rooms/<roomId>/`
+
+```
+<酒館>/
+├── rooms/<roomId>/
+│   ├── room.json     name / host / cast / sessions{角色→session}
+│   ├── chat.jsonl
+│   ├── art/ files/ runs/
+├── characters/ worldbooks/ art/ workflows/
+├── tavern.json       layout: 3
+└── .sessions/<sessionId>.json   session → 房間（agent 用的反向索引）
+```
+
+為什麼：
+
+1. **路徑不該有角色。** 一間房可以有多個角色（`cast`），舊的
+   `chats/<角色>/<roomId>/` 卻把「建立時選的那個角色」寫進路徑——加人、換人、
+   改名都不動它，路徑變成歷史遺跡，連資產 URL 也跟着用 `角色/roomId`。
+2. **房間要自己講得出有哪些 session。** `room.json.sessions` 是「房間 → session」
+   的真相（一個成員一個）；`.sessions/` 是「session → 房間」的反向索引（agent 讀它）。
+   以前只有索引，索引掉了就**連房主以外的成員都救不回來**（標頭只認房主）。
+3. **清單按最後一句話排**：`chat.jsonl` 的 mtime，不是資料夾 mtime（改設定、丟圖
+   都會動到資料夾 mtime，排序會亂跳）。
+
+其他一起改的：
+
+| | |
+|---|---|
+| **一次性遷移** | `migrateLayout()`：`chats/<角色>/<roomId>/` → `rooms/<roomId>/`，只做 `rename`、冪等、不覆蓋（撞號就停下來回報）；搬之前補 `host`／`sessions`，並把主圖 key 從 `chat:<角色>/<roomId>` 改成 `chat:<roomId>`。舊的 `chats/<角色>/*.jsonl`（2.6 以前）不動也不讀。 |
+| **`room.json` v2** | `host`、`sessions`；舊房間讀的時候自動補 `host`（＝舊路徑那一層），`cast: []` 的行為不變。 |
+| **綁定雙向** | `bindSession` 同時寫 `.sessions/` 與 `room.json.sessions`；`unbindSession` 兩邊一起清；`rebuildSessionBindings` 優先用房間那一側，再退回 `chat.jsonl` 標頭。 |
+| **agent 面** | `roomJson()` 先找 `rooms/<roomId>/room.json`，再退回舊 `chats/...`——多人房間的非房主成員也讀得到每房設定（以前用成員當路徑，讀不到）。 |
+| **資產 owner** | 房間資產的 owner 改成**房間 id**（一段）；舊的 `角色/roomId` 仍然收（取最後一段）。主圖 key 由遷移改寫。 |
+| **附件路由** | `rooms/<roomId>/files/`；舊的三段 URL `/<角色>/<roomId>/<檔名>` 仍然收。 |
+| **session 狀態** | 進房時讀 `room.json.sessions` ＋ `remote.session.list`：不見了就**在送訊息前**說「送訊息會開一個新的，模型不會記得舊對話」；還沒有 session 時也說「第一次送訊息會開一個」。讀不到任一邊就不顯示。 |
+| **出廠預設** | 新酒館直接寫 `layout: 3`、`rooms/`；舊酒館第一次被讀到時自動遷移。沒有 `tavern.json` 的資料夾（v1 殘留）**不遷移、也不補檔**——`scaffolded` 的判斷要靠那個檔案。 |
+
+### 插件有沒有資料庫？
+
+沒有「給使用者資料用的資料庫」。DSH 宿主有 `ctx.storageDomain`（JSON／SQLite 後端、
+schema 驗證的 KV），但它是**宿主半專用**、住在 DSH 的資料目錄，不能跟着酒館帶走；
+DSH 的 session 是 JSONL，另有 `dsh-session-query-sqlite` 當搜尋索引。酒館維持
+**檔案是真相**；要加速只做可重建的快取。詳見 `docs/street-storage-plan.md` §6。
+
+### 測試
+
+- `test-workspace.mjs`：新增 13b（房間的 session 清單）與 13c（舊佈局遷移：
+  host／sessions／主圖 key／冪等／撞號）。
+- `smoke.mjs`：新增 4c（`street.cards`）；房間、資產、附件、workflow run 全部改走
+  `rooms/`；舊版殘留仍然是「讀取不補檔」。
+- `test-client.mjs`：街頁（卡片、計數、missing、繼續、空街、插件分頁共用同一份）、
+  座位清單（街＋酒館＋對話＋插件分頁）、拿掉舊側邊欄那組測試。
+- `test-registry.mjs`／`test-workflow.mjs`：路徑改成 `rooms/`。
+
+> ⚠️ 這一版**動了使用者資料夾**（一次遷移）。測試釘住「只 rename、不覆蓋、撞號停下來」；
+> 遷移前的資料不會被刪，舊的 `chats/` 裡如果有 2.6 以前的 `.jsonl` 也原樣留著。
+
+---
+
+## 2.7.2 — 酒館街回來了（2.7.1 的診斷是錯的）
+
+使用者：
+
+> 幫我繼續完善這個酒館功能，現在有一些功能隨着更新遺失了，例如酒館街的概念。
+
+### 2.7.1 說「-1 輸給原生 0」——不是，是我們自己崩了
+
+2.7.1 的座位快照長這樣：
+
+| 座位 | 住戶 | priority | active |
+|---|---|---|---|
+| `sidebar.workspaces`（single） | `dsh-tavern` | -1 | ❌ |
+| `sidebar.workspaces`（single） | 原生工作區瀏覽器 | 0 | ✅ |
+
+當時的推論是「priority -1 搶不到 0」，於是只補了一顆 `sidebar.panellist` 燈籠，
+酒館街留著但當成「搶不到座位」不再處理。**那個推論是錯的**，而且錯得很貴：
+它讓使用者失去了整個導航（酒館街 → 酒館 → 對話）。
+
+真相在 DSH 的 `SlotCore` 裡（`dsh-web-frontend` 的 slot 核心）：
+
+- 座位排序是 **priority 由小到大**，第一個勝出——原始碼的錯誤訊息寫得很直白：
+  「register at a different priority to shadow it (lowest renders)」。
+  **`-1` 比原生的 `0` 小，所以我們本來就是勝出者。**
+- `active: false` 不是「輸了」，是 **abdicated**（渲染期崩掉、被退位）。
+  `entriesOfSlot()` 會濾掉退位的那一筆，下一個候選人（原生）補上。
+
+那一筆為什麼崩？`renderSlot` 是**綁在「勝出的那一筆註冊」**上的：它只認那一筆
+`children` 裡宣告過的子座位，其他的一律丟 `SlotOwnershipError`。原生的
+`WorkspaceBrowser` 每畫一條 session 列就會呼叫：
+
+```
+sidebar.workspaces.session.row.action
+sidebar.session.row.leading
+sidebar.session.row.trailing
+sidebar.session.row.hover
+```
+
+而我們只鏡射了 `directoryFlow`。**第一條手動展開的列一畫，整個酒館街就退位**，
+原生安安靜靜地接手——沒有錯誤訊息、也沒有日誌，只有「側邊欄裡什麼都沒有」。
+
+### 這一版做了什麼
+
+| | |
+|---|---|
+| **五個子座位全部鏡射**（`WORKSPACE_CHILD_SLOTS`） | 原生宣告幾個，我們就宣告幾個**新名字**的鏡射座位（`dsh-tavern.workspaces.*`）。不能沿用原名——原生那一筆還活著，名字已經被它宣告走了，再宣告一次會丟「already declared」 |
+| **住戶跟著搬**（`syncWorkspaceMirrors`） | 不只初始那一次：`slots.subscribe(seat, …)` 之後來源座位一有增減就跟著補／拆。搬的是 `entriesOfSlot()` 的**勝出者**（已退位的不搬，不然會把崩掉的那一筆再搬一次） |
+| **每一個 `renderSlot` 鍵都換**（`TavernSidebarRegion`） | 逐一映射到鏡射座位；**未知的鍵回 `null` 並警告一次**——DSH 以後多一個子座位時，最壞是少一小塊，不是整個酒館街消失 |
+| **priority 維持 `-1`** | 不要再「修」成 `+1`：那才會真的輸掉（`lowest renders`）。測試把這一條釘住 |
+| 燈籠留著 | 它是第二個入口（面板入口），不是酒館街的替代品 |
+| 測試 | `test-client.mjs` 新增一節：宣告清單、鏡射座位、嚴格版 `renderSlot`（沒宣告就丟錯，跟 DSH 一樣）驅動假的原生瀏覽器把五個座位全打一次；再加一個「未知子座位」的情境 |
+
+### 這一版學到的（給下一個接手的人）
+
+1. **`active: false` 先想「崩了」，再想「輸了」。** 兩種症狀一模一樣（什麼都沒出現），
+   但修法完全相反：一個要補授權，一個要改 priority。
+2. **接管了一個座位，就要接管它**整個**子樹。** 只鏡射畫面上看得到的那一個洞
+   （資料夾選擇）不夠——列上的裝飾、動作、hover 都是子座位，漏一個就退位。
+3. **錯誤訊息原文比推論可靠。** `SlotOwnershipError`、`(lowest renders)` 都在
+   DSH 的原始碼裡；當時如果有人去讀那份原始碼，2.7.1 就不會只補一顆燈籠。
+
+---
+
 ## 2.7.1 — 側邊欄入口（「裝好了卻什麼都看不到」）
 
 使用者：
