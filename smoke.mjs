@@ -14,7 +14,7 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { readTextChunks } from './lib/pngcard.js'
 
 // 註冊表放在 DSH home；測試一律用暫存 home，才不會碰到使用者真的酒館街。
@@ -28,6 +28,13 @@ const calls = { effects: [], routes: [] }
 
 /** 一個夠用的假 Context（只有 webServer，v2 不需要別的服務）。 */
 const archivedSessions = []
+/**
+ * 被登記成 DSH 工作區的路徑（`workspaceController.create`）。
+ *
+ * ⚠️ 使用者選了資料夾開酒館，**那個資料夾就該是它的工作區**——不是先開一個
+ * 別的地方，再把對話丟進「未分組」。
+ */
+const workspaceCreates = []
 /** 假的「現在活著的 session」（`sessions.list()` 會回這個）。 */
 const liveSessionStubs = []
 function makeCtx() {
@@ -50,6 +57,15 @@ function makeCtx() {
           archiveSession(request) {
             archivedSessions.push(request.sessionId)
             return Promise.resolve({ archivedSessionIds: [request.sessionId] })
+          },
+          // ⚠️ 「酒館資料夾＝工作區」那一條（見 `ensureDshWorkspace`）。這裡只記錄
+          //    路徑：真正的分組是 DSH 的 registry 做的，測試只要確認我們送對了。
+          create(request) {
+            workspaceCreates.push(request.path)
+            return Promise.resolve({
+              workspace: { id: 'ws-' + String(workspaceCreates.length), path: request.path },
+              created: true,
+            })
           },
         }
       }
@@ -274,6 +290,28 @@ function pngCard(entries) {
   assert.equal(added.value.created, true, '第一次新增')
   assert.equal(added.value.taverns.length, 1)
   assert.equal(added.value.activeId, added.value.added.id, '新增後直接切換過去')
+
+  /**
+   * ⚠️ **使用者剛選的那個資料夾＝它在 DSH 側邊欄的工作區。**
+   *
+   * 不登記的話，這些 session 的 `cwd` 不屬於任何工作區，DSH 只能把它們丟進
+   * 「未分組」——使用者看到的就是那一堆。而且要登記的是**酒館資料夾本身**，
+   * 不是另外開一個地方再把它掛過去。
+   */
+  assert.deepEqual(workspaceCreates, [resolve(shop)], '⚠️ 登記的必須是酒館那個資料夾（而且只送一次）')
+  assert.equal(added.value.dshWorkspace.ok, true, '回應要帶上登記結果')
+  assert.equal(added.value.dshWorkspace.created, true)
+
+  /**
+   * ⚠️ **既有的酒館／既有的對話**不會再走 `tavern.add` 或 `session.bind`，所以
+   * 客戶端在開房間時會補問一次（`ChatPanel` 的 `workspaceAsked`）。這一支必須
+   * 存在、而且送的是同一條路徑；宿主那一邊是冪等的，DSH 只會回既有那一筆。
+   */
+  const askedWorkspace = await callRpc('tavern.workspace', { id: added.value.added.id })
+  assert.equal(askedWorkspace.ok, true, 'tavern.workspace 應該存在：' + askedWorkspace.error)
+  assert.equal(askedWorkspace.value.ok, true, '這台 DSH 有 workspaceController ⇒ 要登記得到')
+  assert.equal(workspaceCreates.length, 2, '再一次登記同一條路徑（冪等；DSH 自己回既有那一筆）')
+  assert.equal(workspaceCreates[1], resolve(shop))
 
   // 這一步就是 v2 的核心：資料夾裡真的多了東西。
   for (const part of ['characters', 'worldbooks', 'rooms', 'art']) {
