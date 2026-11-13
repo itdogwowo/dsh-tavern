@@ -194,7 +194,19 @@ if (existsSync(agentPath)) {
   const files = existsSync(libDir) ? readdirSync(libDir).filter((name) => name.endsWith('.js')) : []
   const forbidden = [
     [/['"]agent-presets['"]/, "DSH settings 命名空間 'agent-presets'"],
-    [/\bagentPresets\b/, 'DSH 的 preset 名冊服務 agentPresets'],
+    /**
+     * ⚠️ **2026-11-13 放寬**（原本是 `/\bagentPresets\b/` 一律禁止）。
+     *
+     * 原因：新版 DSH 的 preset 是 `@deepseek-ai/dsh-agent-preset` 的一列，
+     * **只存在於執行中的 `agentPresets` registry**——`~/.dsh/.agent-presets/`
+     * 那個資料夾已經沒有人讀。症狀是使用者看到的
+     * `Unknown agent preset: dsh-tavern`。
+     *
+     * 唯一合法的用法是**註冊我們自己那一個 id**（`register()`）。原本要防的
+     * 事情沒有變：**不可以去動「預設是哪一個」**（`select`／`defaultId`／
+     * `config`）——「用過酒館之後所有新對話都變成酒館模式」正是那個症狀。
+     */
+    [/\bagentPresets\s*\.\s*(select|defaultId|config)\b/, '改 DSH preset 名冊的預設（select／defaultId／config）'],
     [/remote\.settings/, 'DSH 的 remote.settings'],
     [/['"]settings\.ya?ml['"]/, 'DSH 的設定檔 settings.yaml'],
   ]

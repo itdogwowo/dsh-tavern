@@ -31,7 +31,7 @@ DSH 有能力但沒有角色扮演的前台。這個插件是把兩邊接起來�
 
 | | |
 |---|---|
-| 版本 | **2.14.0**（酒館資料夾＝它在 DSH 的工作區，房間的 session 不再落到「未分組」；2.13.0 是店面元素：每間店的 `shop.json` 招牌／店面樣式＋**破框**＋邊框形狀／屋簷／植物／窗／門；街的彩旗；店面吃該酒館 theme 色盤、街道骨架與路面維持 DSH；街頁可捲動。2.8.0 把街搬進插件頁／主面板、房間改 `rooms/<roomId>/` 並自動遷移）。工作樓的資料層／執行器／畫布在 2.7.0。**push 一律要先問使用者** |
+| 版本 | **2.14.1**（preset 改走執行中的 `agentPresets` registry——新版 DSH 不再掃 `.agent-presets/`；模型選單可以捲了。2.14.0 是酒館資料夾＝DSH 工作區；2.13.0 是店面元素：每間店的 `shop.json` 招牌／店面樣式＋**破框**＋邊框形狀／屋簷／植物／窗／門；街的彩旗；店面吃該酒館 theme 色盤、街道骨架與路面維持 DSH；街頁可捲動。2.8.0 把街搬進插件頁／主面板、房間改 `rooms/<roomId>/` 並自動遷移）。工作樓的資料層／執行器／畫布在 2.7.0。**push 一律要先問使用者** |
 | 測試 | `npm test` **十二套全綠**（`verify` / `test-pngcard` / `test-worldbook` / `test-agent` / `test-preset` / `test-samplers` / `test-render` / **`test-workflow`** / `smoke` / `test-workspace` / `test-registry` / `test-client`）|
 | 架構 | **三個面全部實作完成**：宿主半、瀏覽器半、**Agent 面** |
 | 規範 | 12 條（R1–R13），**每一條都有測試釘住** |
@@ -46,6 +46,7 @@ DSH 有能力但沒有角色扮演的前台。這個插件是把兩邊接起來�
 | 生成參數 | ✅ 溫度／最多 token／**`stop` 序列（有開關）**，房間蓋過酒館。⚠️ **`top_p` 做不到**（DSH 介面沒有它），見 §2.6.48 |
 | 回覆格式 | ✅ **2.6.57 補上「指定」那一半**（`render.json` → 提示詞）。見 §2.6.57——在那之前只有「解碼」 |
 | **DSH 工作區** | ✅ **2.14.0**：`tavern.add`／`session.bind`／`tavern.workspace`（新 op，開房間時補登記）三個時機把**酒館資料夾**登記成工作區（`workspaceController.create`，冪等；舊版 DSH 沒這個服務就跳過）。⚠️ 移除酒館**不刪**工作區，只封存 session |
+| **preset** | ⚠️ **2.14.1 改路線**：新版 DSH 的 preset 只認**執行中的 `agentPresets` registry**（`~/.dsh/.agent-presets/` 那份檔案不再被掃，症狀是 `Unknown agent preset: dsh-tavern`）。`preset.ensure` 先 `register()`（冪等、只註冊自己那一個 id）再照舊寫檔案（舊版 DSH 還需要它）。`verify.mjs` 仍禁止動 `select`／`defaultId` |
 | 每房設定 | ✅ **2.6.49 才真的生效**（`session.bind` 以前沒轉送 `room`），見 §2.6.49——這一條含工具權限／這一場的指示／生成參數 |
 | composer | ✅ 附件鈕、**工具權限 chip**、檔案路徑、模型 chip、計量環、送出（2.6.50）|
 | 世界書 | ✅ 位置三個（2.6.59）、房間那一層（2.6.62）、逐書覆寫（2.6.64）、**房間調條目優先序（2.6.71）**、**「✎ 修改」跳到藏書頁（2.6.72）** |

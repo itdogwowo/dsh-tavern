@@ -35,6 +35,12 @@ const archivedSessions = []
  * 別的地方，再把對話丟進「未分組」。
  */
 const workspaceCreates = []
+/**
+ * 新版 DSH 的 preset 是**執行中的 registry**（`agentPresets`）裡的一列，
+ * 不再從 `.agent-presets/` 掃資料夾。這裡記下 `register()` 收到什麼。
+ */
+const presetRegistrations = []
+let presetRoster = []
 /** 假的「現在活著的 session」（`sessions.list()` 會回這個）。 */
 const liveSessionStubs = []
 function makeCtx() {
@@ -52,6 +58,22 @@ function makeCtx() {
       //    「刪掉了，但 DSH 那邊還留著一列未分組」。
       // ⚠️ 「還在記憶體裡的 session」清單（可變）：刪檔前要問它——活著的一律只封存。
       if (name === 'sessions') return { list: () => liveSessionStubs }
+      if (name === 'agentPresets') {
+        return {
+          list: () => Promise.resolve(presetRoster),
+          register(definition) {
+            presetRegistrations.push(definition)
+            presetRoster = [{ id: definition.id, name: definition.name, order: definition.order }]
+            return Promise.resolve(() => {
+              presetRoster = []
+            })
+          },
+          resolve(id) {
+            const found = presetRoster.find((one) => one.id === id)
+            return Promise.resolve(found === undefined ? { id, broken: 'not mounted' } : { id })
+          },
+        }
+      }
       if (name === 'workspaceController') {
         return {
           archiveSession(request) {
@@ -880,8 +902,32 @@ function pngCard(entries) {
   assert.equal(ensured.ok, true, 'preset.ensure 應該成功：' + ensured.error)
   assert.ok(['created', 'updated', 'unchanged', 'foreign'].includes(ensured.value.action), 'action 要看得懂：' + ensured.value.action)
 
+  /**
+   * ⚠️ **新版 DSH 的 preset 不再從資料夾掃**（2026-11-13 使用者回報
+   * 「Unknown agent preset: dsh-tavern」）。`~/.dsh/.agent-presets/` 那份檔案
+   * 舊版才讀；新版只認執行中的 `agentPresets` registry。所以兩個都要驗：
+   * 檔案照寫（舊版用），registry 也真的註冊了（新版用）。
+   */
+  assert.equal(ensured.value.runtime.mode, 'runtime', '有 agentPresets 服務時要走 registry：' + JSON.stringify(ensured.value.runtime))
+  assert.equal(ensured.value.runtime.created, true, '第一次要真的註冊進去')
+  assert.equal(ensured.value.runtime.ok, true, '註冊完 resolve 得到 ⇒ ok')
+  const registered = presetRegistrations[0]
+  assert.ok(registered !== undefined, '要送出一個 preset 定義')
+  assert.equal(registered.id, 'dsh-tavern', 'id 要跟 session.create 指名的同一個')
+  assert.equal(Array.isArray(registered.plugins) && registered.plugins.length, 1, '只掛我們的 agent 面')
+  assert.equal(registered.plugins[0].id, 'tavern-agent')
+  assert.equal(/lib[\\/]agent\.js$/.test(registered.plugins[0].name), true, '要指到真正的 agent.js：' + registered.plugins[0].name)
+  assert.equal(
+    registered.plugins.some((one) => String(one.name).includes('dsh-persona')),
+    false,
+    '不可以掛 dsh-persona（兩個 complete section 會讓組裝失敗）',
+  )
+  // 再叫一次不可以重複註冊（registry 會丟 Duplicate；我們先用 list 擋掉了）
+  const again = await callRpc('preset.ensure', { dshHome: home })
+  assert.equal(again.value.runtime.created, false, '第二次是沿用，不是重新註冊')
+  assert.equal(presetRegistrations.length, 1, '只註冊一次')
+
   const source = readFileSync(join(ensured.value.dir, 'agent.cordis.yml'), 'utf8')
-  // 最要緊的一條：不可以真的掛 persona（兩個 complete section 會讓組裝失敗）
   assert.equal(/^\s*name:\s*'@deepseek-ai\/dsh-persona'/m.test(source), false, '不可以掛 dsh-persona')
   assert.equal(source.includes('tavern-agent'), true, '要指到我們的 agent 面')
   assert.equal(/name: '.*lib[\\/]agent\.js'/.test(source), true, '要指到真正的 agent.js：' + source)

@@ -2,6 +2,58 @@
 
 版本號照 [Semantic Versioning](https://semver.org/lang/zh-TW/)。
 
+## 2.14.1 — 開新對話失敗（`Unknown agent preset: dsh-tavern`）＋ 模型選單不能捲
+
+使用者：
+
+> 開新對話失敗：Unknown agent preset: dsh-tavern
+> 然後就是選擇模型的時候無法滾動所以我能選擇的受到限制
+
+### 1. preset：DSH 換了機制，我們還停在舊的
+
+| | 舊版（我們 2.6.x 寫的） | 新版（現在） |
+|---|---|---|
+| preset 住在哪 | `<DSH home>/.agent-presets/<id>/agent.cordis.yml` | **執行中的 `agentPresets` registry**（`@deepseek-ai/dsh-agent-preset` 的一列） |
+| 誰讀它 | harness 啟動時掃那個資料夾 | 只認 registry；**不再掃資料夾** |
+
+所以檔案還躺在 `~/.dsh/.agent-presets/dsh-tavern/`，但是沒有人讀它
+（registry 的 `available` 只有內建的 `standard`／`ptc`／`minimal`／`cordis`）。
+
+修法（`lib/preset.js` 的 `ensureRuntimePreset`）：
+
+- `preset.ensure` **先**走 `ctx.get('agentPresets').register()`——形狀照出貨的
+  `presets/minimal.patch.yml`：`{ id, name, description, order, plugins }`，
+  `plugins` 是 loader 的 entry list，`name` 收 `lib/agent.js` 的**絕對路徑**。
+- **再照舊寫檔案**：新版多一個沒人讀的資料夾不會壞，舊版少了它就開不了對話。
+- ⚠️ `register()` 對 mount 失敗**不丟錯**（記在 `record.broken`），所以註冊完要再
+  `resolve()` 一次，把真正的原因帶回去——否則使用者只會看到一句沒有資訊的失敗。
+- ⚠️ 重複註冊會丟 `Duplicate agent preset`：先用 `list()` 查、`created: false`
+  沿用，不會每次開對話都重新註冊。
+- 註冊是**執行時**的，不寫任何使用者設定；DSH 重啟之後第一次要開對話時再註冊。
+
+`verify.mjs` 那條「不准碰使用者的預設 preset」跟著放寬：原本 `agentPresets`
+一律禁止，現在**只准註冊我們自己那一個 id**，`agentPresets.select`／`defaultId`／
+`config` 仍然禁止——那條規則原本要防的是「用過酒館之後所有新對話都變成酒館模式」，
+理由沒有變。
+
+### 2. 模型／工具權限選單不能捲
+
+`.dsh-tv-modelPanel`／`.dsh-tv-permPanel` 把 `overflow` 蓋成 `hidden`，可是面板
+**不是 flex 容器**——裡面的 `.dsh-tv-modelList` 只會長到內容那麼高，超出的部分被
+切掉，連捲軸都不會出現。模型一多就只能看到前面幾顆。
+
+修法：面板 `display:flex;flex-direction:column`，清單 `flex:1 1 auto;min-height:0`
+（它本來就有 `overflow-y:auto`，缺的是**高度來源**），再加 `overscroll-behavior:contain`。
+
+### 測試／文件
+
+- `smoke` 11c：假 ctx 多一個 `agentPresets`，驗 registry 真的被註冊、`id` 與
+  `plugins[0].name` 都對、第二次是沿用不是重複註冊。
+- `npm test` 十二套全綠（`preset.ensure` 的回應**保留舊欄位** `action`／`dir`，
+  新的東西只加一格 `runtime`）。
+
+---
+
 ## 2.14.0 — 酒館資料夾＝它在 DSH 的工作區（不再是一堆「未分組」）
 
 使用者：
